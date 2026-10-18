@@ -22,18 +22,23 @@
 from __future__ import annotations
 
 import argparse
-import io
 import sys
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+# 直接 `python tests/synthetic_golden.py` 运行时，把仓库根放进 sys.path（供 import src.*）
+if __package__ in (None, ""):
+    _ROOT = Path(__file__).resolve().parents[1]
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
+
 import cv2
 import ezdxf
 import numpy as np
-from ezdxf import document as ezdxf_document
 from ezdxf.math import arc_angle_span_rad, bulge_to_arc
+
+from src.dxf_repro import dxf_bytes as dxf_bytes_for_drawing
 
 # 物理常数（不是可调参数）：1 英寸 = 25.4 mm
 MM_PER_INCH = 25.4
@@ -293,67 +298,13 @@ def build_dxf(scene: Scene) -> ezdxf.document.Drawing:
     return doc
 
 
-#: 写进 DXF 的固定 ezdxf 标记；替换默认的 "<版本> @ <时间戳>"（否则每次写出字节都不同）
-FIXED_EZDXF_MARKER = "r2v-tool synthetic fixture (deterministic)"
-
-
-def _pin_class_order(doc: ezdxf.document.Drawing) -> None:
-    """把 CLASSES 段固定成「按名字字典序」的顺序。
-
-    实测事实（ezdxf 1.4.4）：`ezdxf.new()` 之后的文档里 `doc.classes.classes` 是空的，
-    CLASS 定义在**写出时**由 `add_required_classes()` 补齐，而 `REQUIRED_CLASSES`
-    是 set、`add_required_classes()` 直接迭代它 → CLASS 段顺序随 Python 字符串哈希
-    随机化（同进程内稳定、跨进程不稳定）。实测 5 次生成得到 2 种字节。
-    对策：写出前先补齐必需类，再把 OrderedDict 按 key 排序重建；写出后再校验一次。
-    """
-    doc.classes.add_required_classes(doc.dxfversion)  # 用 ezdxf 自己的版本兜底逻辑
-    items = sorted(doc.classes.classes.items(), key=lambda kv: (kv[0][0], kv[0][1]))
-    doc.classes.classes = OrderedDict(items)
-
-
-def _assert_class_order(doc: ezdxf.document.Drawing) -> None:
-    keys = list(doc.classes.classes.keys())
-    if keys != sorted(keys):
-        raise RuntimeError(
-            "CLASSES 段顺序不稳定：ezdxf 在写出时又追加了未排序的类定义，"
-            "请复查 tests/synthetic_golden.py:_pin_class_order"
-        )
-
-
 def dxf_bytes(scene: Scene) -> bytes:
     """确定性 DXF 字节。
 
-    实测事实（ezdxf 1.4.4）：默认写出有四类随时间/随机变化的内容，会让同一场景
-    两次生成字节不同、golden 每次重生成都污染 git：
-      1. `$TDCREATE/$TDUPDATE/$VERSIONGUID/$FINGERPRINTGUID`
-         → ezdxf 自带开关 `options.write_fixed_meta_data_for_testing` 可固定；
-      2. CREATED_BY_EZDXF / WRITTEN_BY_EZDXF 两个 DICTIONARYVAR 值
-         （`document.ezdxf_marker_string()` 返回 "<版本> @ <ISO 时间>"）
-         → 该开关**不管**它，只能临时替换 `ezdxf.document.ezdxf_marker_string`；
-      3. CLASSES 段顺序（见 `_pin_class_order`）；
-      4. 平台换行转换 → 本函数输出字节走 `write_bytes`，固定 LF + UTF-8。
-    若将来 ezdxf 改了实现（标记没被替换 / 类名缺失），这里**直接抛错**，不静默降级。
+    实现已统一到 `src/dxf_repro.py`（与 `src/dxf_writer.py` 共用同一套固化逻辑：
+    固定时间戳/GUID/标记串、CLASSES 段排序、只写 LF 的字节流），避免两处漂移。
     """
-    original_marker = ezdxf_document.ezdxf_marker_string
-    previous_option = ezdxf.options.write_fixed_meta_data_for_testing
-    ezdxf_document.ezdxf_marker_string = lambda: FIXED_EZDXF_MARKER
-    ezdxf.options.write_fixed_meta_data_for_testing = True
-    try:
-        doc = build_dxf(scene)
-        _pin_class_order(doc)
-        stream = io.StringIO()
-        doc.write(stream)
-        _assert_class_order(doc)
-        data = doc.encode(stream.getvalue())
-    finally:
-        ezdxf_document.ezdxf_marker_string = original_marker
-        ezdxf.options.write_fixed_meta_data_for_testing = previous_option
-    if FIXED_EZDXF_MARKER.encode() not in data:
-        raise RuntimeError(
-            "DXF 里的 ezdxf 标记未被替换：ezdxf 的实现变了，"
-            "请复查 tests/synthetic_golden.py:dxf_bytes"
-        )
-    return data
+    return dxf_bytes_for_drawing(build_dxf(scene))
 
 
 # ---------------------------------------------------------------------------

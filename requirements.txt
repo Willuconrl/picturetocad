@@ -38,7 +38,7 @@ typing_extensions==4.16.0              # PSF-2.0；ezdxf 传递依赖
 pydantic==2.14.1                       # MIT；schema 校验
 pydantic-settings==2.15.0              # MIT；config.yaml 加载
 PyYAML==6.0.3                          # MIT；读 config.yaml / presets.yaml
-Pillow==12.3.0                         # MIT-CMU；读 TIFF/JPEG/PNG 的 DPI 元数据（SPEC §3.2）
+Pillow==12.3.0                         # SPEC §3.2 DPI metadata；cv2 读 EXIF/pHYs 不可靠
 
 # --- 测试 ---
 pytest==9.1.1                          # MIT

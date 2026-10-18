@@ -1729,7 +1729,7 @@ ACAD
   0
 APPID
   5
-31
+32
 330
 3
 100
@@ -1743,7 +1743,7 @@ HATCHBACKGROUNDCOLOR
   0
 APPID
   5
-32
+33
 330
 3
 100
@@ -3061,7 +3061,7 @@ CREATED_BY_EZDXF
   3
 WRITTEN_BY_EZDXF
 350
-33
+31
   0
 DICTIONARYVAR
   5
@@ -3073,11 +3073,11 @@ DictionaryVariables
 280
 0
   1
-r2v-tool synthetic fixture (deterministic)
+r2v-tool deterministic output
   0
 DICTIONARYVAR
   5
-33
+31
 330
 2D
 100
@@ -3085,7 +3085,7 @@ DictionaryVariables
 280
 0
   1
-r2v-tool synthetic fixture (deterministic)
+r2v-tool deterministic output
   0
 ENDSEC
   0

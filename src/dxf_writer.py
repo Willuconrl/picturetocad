@@ -537,7 +537,11 @@ class DXFWriter:
         except Exception as exc:  # 自定义变量不是必须项，失败不致命但要留痕
             self.warnings.append(f"自定义头变量写入失败: {exc}")
 
-        self.doc.saveas(str(path))
+        # 确定性写出（SPEC §3.3 比特级可复现）：固定元数据/GUID/CLASSES 顺序，只写 LF。
+        # 详见 src/dxf_repro.py；saveas() 会引入时间戳、随机 GUID 与 Windows CRLF。
+        from src.dxf_repro import save_deterministic
+
+        save_deterministic(self.doc, path)
         report = self._self_check(path, expected=self._entities_written)
         report["warnings"] = self.warnings
         report["filepath"] = str(path)
