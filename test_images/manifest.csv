@@ -1,0 +1,6 @@
+file,preset,true_dpi,page_class,golden_dxf,notes,has_golden
+QDIZE9403.JPG,mechanical,72,mechanical_part,QDIZE9403.dxf,"截图，非扫描件（EXIF 72DPI）；低 DPI 兼容测试图，预算按 300/72 放大",false
+synthetic_circle_full.png,,300,synthetic,synthetic_circle_full.dxf,"合成图（tests/synthetic_golden.py）：完整圆 r=12mm，用于 CIRCLE 判定与半径相对误差",true
+synthetic_line_single.png,,300,synthetic,synthetic_line_single.dxf,"合成图：单条斜线 (8,10)-(52,20)，用于端点误差与长度相对误差",true
+synthetic_arc_120.png,,300,synthetic,synthetic_arc_120.dxf,"合成图：120° 圆弧 r=15mm（30°→150°），用于 ARC 半径与扫角",true
+synthetic_polyline_bulge.png,,300,synthetic,synthetic_polyline_bulge.dxf,"合成图：LWPOLYLINE 首段 bulge=0.5（106.26° 弧），用于 bulge 写读一致",true

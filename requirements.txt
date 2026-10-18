@@ -1,0 +1,51 @@
+# R2V 光栅图转 CAD · 运行依赖（锁定版本）
+#
+# 安装：
+#     python -m pip install -r requirements.txt
+#
+# 版本锁定依据（不许凭印象改）：
+#   1. 验收基线 = Linux + Python 3.10（用户决策 #4）。
+#   2. 每个版本都用 scripts/verify_wheels.py 查过 PyPI 元数据：
+#      cp310 + manylinux_x86_64 有 wheel；本机开发环境（Windows + cp314）也有 wheel。
+#   3. 校验命令（CI 必跑）：python scripts/verify_wheels.py --check
+#
+# 为什么有 python_version 标记（重要，别删）：
+#   实测事实——numpy / scipy / scikit-image 的**没有任何单个版本**同时提供
+#   cp310-manylinux wheel 与 cp314-win wheel：
+#       numpy        2.2.6  -> requires_python >=3.10；2.3.0 起 >=3.11，2.5.x 起 >=3.12
+#       scipy        1.15.3 -> >=3.10；1.16.0 起 >=3.11
+#       scikit-image 0.25.2 -> >=3.10；0.26.0 起 >=3.11
+#   因此按解释器分流：<3.12 用验收基线组（3.10/3.11 均可用），>=3.12 用开发组。
+#   **验收与回归以 <3.12 组为准**；>=3.12 组只用于本机（3.14）自测，不得用于出具精度结论。
+#   若将来把验收环境升到 3.12+，删掉 <3.12 两行并重新跑 --check。
+
+# --- 核心数值与图像（SPEC §2）---
+numpy==2.2.6;                          python_version < "3.12"      # BSD-3；坐标/矩阵 float64
+numpy==2.5.4;                          python_version >= "3.12"     # 开发组（本机 3.14 实测）
+scipy==1.15.3;                         python_version < "3.12"      # BSD-3；Taubin 初值 + LM 精化（S4）
+scipy==1.18.1;                         python_version >= "3.12"     # 开发组
+scikit-image==0.25.2;                  python_version < "3.12"      # BSD-3；skeletonize / distance_transform（S2/S3）
+scikit-image==0.26.0;                  python_version >= "3.12"     # 开发组
+opencv-python-headless==5.0.0.93       # Apache-2.0；主体管线（headless：Linux 服务器无 libGL）
+
+# --- DXF 写出（SPEC §2：唯一 DXF 依赖）---
+ezdxf==1.4.4                           # MIT；R2018 写出（API 事实已由 scripts/api_probe.py 固化）
+fonttools==4.65.0                      # MIT；ezdxf 传递依赖（文字度量）；4.67.0 起 requires_python>=3.11，故不选
+pyparsing==3.3.3                       # MIT；ezdxf 传递依赖
+typing_extensions==4.16.0              # PSF-2.0；ezdxf 传递依赖
+
+# --- 配置与校验（SPEC §5）---
+pydantic==2.14.1                       # MIT；schema 校验
+pydantic-settings==2.15.0              # MIT；config.yaml 加载
+PyYAML==6.0.3                          # MIT；读 config.yaml / presets.yaml
+Pillow==12.3.0                         # MIT-CMU；读 TIFF/JPEG/PNG 的 DPI 元数据（SPEC §3.2）
+
+# --- 测试 ---
+pytest==9.1.1                          # MIT
+hypothesis==6.168.5                    # MPL-2.0；性质测试
+
+# --- OCR（插件化，缺省不装；启用时另行锁定并写 docs/LICENSES.md）---
+# paddleocr / pytesseract 见 SPEC §2，本阶段不引入。
+
+# --- 图形界面（LGPL-3，必须独立包隔离，见 SPEC §2 红线）---
+# PySide6 不进主分发，本阶段不引入。

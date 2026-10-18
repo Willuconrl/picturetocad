@@ -1,0 +1,12 @@
+# pyproject.toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+python_files = ["test_*.py"]
+filterwarnings = [
+    "error::DeprecationWarning:src.*",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]

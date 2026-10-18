@@ -1,0 +1,279 @@
+# =============================================================================
+# R2V 光栅图转 CAD · 配置文件（精度优先版）
+# =============================================================================
+# 设计原则：
+#   1. 几何参数以 mm 或「线宽倍数」为主，px 值由 DPI 反算（运行期派生，不手写）。
+#   2. 任何「放宽」都必须配对一个「置信度门槛」，拿不准就降级/标注，不许硬拟合。
+#   3. presets 只改参数不改代码；本文件为 base，preset 做差量覆盖
+#      （presets.yaml 的 overrides 键名必须与本文件完全一致）。
+#   4. 本文件是「数值参数」的唯一真相源；规范定义与测量方法见 specs/SPEC.md。
+#      文档里出现的数字都是摘录，改阈值时三处同步。
+#   5. 程序启动时用 pydantic 校验，非法值硬失败。
+# =============================================================================
+
+meta:
+  schema_version: "0.2"
+  profile: "precision"            # precision | balanced | fast
+  seed: 42                        # 全局随机种子，保证比特级可复现
+  fail_fast: true                 # 任一阶段 QC 拒绝即中止（批量模式可关）
+
+
+# -----------------------------------------------------------------------------
+# 0. 资源与分块（决定能不能跑大图，也间接决定精度：tile 接缝必须一致）
+# -----------------------------------------------------------------------------
+resources:
+  max_memory_gb: 8
+  tile_size_px: 2048              # 分块边长；必须 ≥ 最大卷积核/形态学核的 6 倍
+  tile_overlap_factor: 3.0        # 重叠 = 当前阶段最大核半径 × 此系数
+  seam_blend_px: 16               # 接缝过渡带，中心裁切，避免 tile 边界阶跃
+  workers: -1                     # -1 = CPU 核心数；OCR 阶段建议手动限流
+  dpi_cap: 1200                   # 超过此 DPI 先下采样（收益递减且内存爆炸）
+
+
+# -----------------------------------------------------------------------------
+# S0 摄入质检（闸门：垃圾进 → 明确标注，不要悄悄处理）
+# -----------------------------------------------------------------------------
+qc:
+  dpi_min: 200                    # 低于此值：mode=reject 则退出；=warn 打标记继续；=degrade 继续但放大误差预算
+  dpi_mode: degrade               # reject | warn | degrade | ignore（degrade=继续 + WARN + 预算按 true_dpi 放大）
+  budget_reference_dpi: 300       # 误差预算基准（SPEC §1.2）；低 DPI 图实际 mm 预算 × (budget_reference_dpi/true_dpi)
+  sharpness_min: 0.25             # 边缘自相关估计的锐度指标；低于此说明「标称高分辨率实际模糊」
+  skew_max_deg: 3.0               # 页面倾斜超过此值自动旋转校正
+  perspective_max_deviation: 0.02 # 四边检测的直线汇聚度；超限建议 projective 配准或拒绝
+  jpeg_ring_artifact_detect: true # 检测 JPEG 压缩环/块效应
+  moire_detect: true              # 频谱峰值检测半调网点/莫尔纹
+  shadow_block_size_ratio: 16     # 分块光照不均检测的块尺寸 = 短边/此值
+  shadow_var_threshold: 0.08      # 块均值方差超过此值 → 触发背景平坦化
+  stain_area_min_mm2: 25          # 污渍/折痕掩膜的最小面积（mm²），小于视为正常图元
+  allow_color_input: true         # false 则直接拒彩色图（彩色细线丢失风险）
+
+
+# -----------------------------------------------------------------------------
+# S1 预处理（目标：不动边缘位置。任何平滑若造成边缘位移 >0.3px 即不可接受）
+# -----------------------------------------------------------------------------
+preprocess:
+  gray_weights: "bt709"           # itu-r bt.709；勿用等权平均（会偏置彩色细线）
+  channel_independent: true       # 彩色图每通道独立二值化后合并，保彩色细线
+  background_flatten:
+    enable: auto                  # auto = 由 qc 阴影检测决定；true/false 强制
+    method: "morph_open"          # morph_open | polynomial | gaussian_ilr
+    kernel_scale_linewidths: 20   # 背景估计核 = 预估线宽 × 此值（必须远大于线宽）
+    polynomial_degree: 2          # method=polynomial 时使用
+  denoise:
+    method: "nlmeans"             # nlmeans | bilateral | none；禁用大核高斯（位移边缘）
+    nlmeans_h: 0.04               # 灰度归一化后的滤波强度；>0.08 开始抹掉细线
+    nlmeans_patch_px: 5
+    nlmeans_search_px: 21
+    edge_preserve: true           # 开启时在强梯度处降低权重
+  invert_auto: true               # 前景占比 < invert_foreground_ratio 且均值>128 则反转
+  invert_foreground_ratio: 0.15
+  clip_border_px: 0               # 扫描仪黑边/装订边裁切宽度（px），0=自动检测
+  upsample_if_thin:               # 线条 <2px 时先超采样再处理（关键！否则骨架必偏）
+    enable: true
+    min_linewidth_px: 2.5
+    factor: 2                     # 只允许 2 或 3（更大无意义，拟合后再除回来）
+    kernel: "lanczos"
+
+
+# -----------------------------------------------------------------------------
+# S2 二值化与亚像素边缘（精度第一来源：这里错 1px，后面全错）
+# -----------------------------------------------------------------------------
+binarize:
+  # --- 多方法并行 + 自动选优（核心：不赌单一算法）---
+  methods: ["sauvola", "otsu", "niblack", "local_gaussian"]
+  selector_metric: "foreground_stability"   # 连通域尺度稳定性 + 局部对比度一致性
+  sauvola:
+    window_ratio: 0.02            # 窗口 = 短边 × 此值（自适应 DPI，比写死 px 正确）
+    k: 0.2                        # Sauvola 灵敏度；0.1~0.3，越小越激进（吞细线）
+    r: 128
+  niblack:
+    window_ratio: 0.015
+    k: -0.2                       # 负值偏亮，保细线
+  local_gaussian:
+    window_ratio: 0.02
+    offset: 5
+  # --- 二值化后清理（顺序固定：先填孔后去小对象）---
+  post:
+    fill_holes: true
+    hole_max_mm2: 4               # 大于此面积的孔洞保留（可能是真实封闭区域）
+    remove_small_objects_mm2: 0.08
+    thin_line_repair: true        # 对断成串的短线做形态学闭运算修复（核=线宽×0.8）
+    break_touching_text: false    # 文字粘连线条时的腐蚀分离（慎用，会偏置线宽）
+  # --- 亚像素边缘（精度胜负手）---
+  subpixel:
+    enable: true
+    method: "gradient_normal_quad"  # 沿梯度法线做二次插值；备选 edge_canny_subpix
+    gradient_sigma_px: 0.8        # 梯度估计的高斯尺度；过大平滑掉角点，过大噪声敏感
+    interpolation: "quadratic"    # quadratic | parabolic_fit
+    min_gradient_mag: 0.05        # 弱梯度点不参与亚像素修正（防噪声漂移）
+    corner_preserve: true         # 角点邻域抑制法线插值，避免角点圆化
+  # --- 线宽估计（供后续所有「线宽倍数」参数使用）---
+  linewidth:
+    method: "distance_transform_ridge"  # dt 脊线 vs steger 中心线
+    robust: "median_mad"                # 用中位数+MAD 抗异常值，不用 mean/std
+    per_edge_reestimate: true           # 每条边重新估计本地线宽（粗细不均图纸必备）
+
+
+# -----------------------------------------------------------------------------
+# S3 骨架化与拓扑重建（最易崩的环节：毛刺、交叉、断线）
+# -----------------------------------------------------------------------------
+skeleton:
+  dual_path: true                 # 形态学细化 与 DT 中轴 并行，按线宽一致性逐段选优
+  thinning:
+    method: "zhang_suen"          # zhang_suen | lee | parallel
+    iterations_limit: 0           # 0=自动
+  medial_axis:
+    use: true
+    prune_by_radius: true         # 中轴半径骤降处截断（防止宽窄交界处生出假分支）
+  spur_removal:
+    enable: true
+    length_threshold_linewidths: 2.5   # ★ 关键：毛刺 = 短于 2.5×本地线宽
+    length_threshold_px: null          # 永远由上行 × 线宽 派生，别手写
+    endpoint_curvature_check: true     # 端点邻域曲率大的视为真端点而非毛刺
+  node:
+    snap_distance_linewidths: 1.0      # 邻近节点合并距离
+    classify: true                     # 端点/T/Y/十字/角点，输出 graph.json
+    angle_tol_deg: 12                  # 节点类型判定的入射角容差
+    redundant_collapse: true           # 共线连续节点合并
+    collinear_tol_px: 0.5              # 偏离直线 ≤0.5px 视为共线
+  bridge:                              # 断线桥接（扫描断裂/文字压线造成的缺口）
+    enable: true
+    max_gap_linewidths: 3.0            # ★ 间隙 ≤ 3×本地线宽 才考虑桥接
+    max_angle_deg: 20                  # 方向延续性：入射角差 ≤20° 才桥接
+    mark_bridged: true                 # 桥接边打 bridged:true，报告里可追溯
+    break_by_text_aware: true          # 因压线文字造成的缺口，先标记 gap_by_text 再决定是否桥接
+  acceptance:                          # S3 单独验收（合成图，节点位置已知）
+    node_type_accuracy_min: 0.95       # 节点类型准确率 ≥95%
+
+
+# -----------------------------------------------------------------------------
+# S4 几何图元拟合（精度核心：模型竞争而不是单阈值）
+# -----------------------------------------------------------------------------
+fitting:
+  tolerance_mm: 0.085                  # 主参数：拟合容差 ≈1px@300DPI
+  dp_epsilon_px: null                  # 未设则由 tolerance_mm 与 DPI 反算，别手写
+  arc_residual_factor: 1.5             # 圆弧残差上限 = ×本地线宽
+  arc_residual_px: null                # 永远由上行 × 线宽派生
+  prefer_arcs: false                   # base 面向工程图；机械图 preset 置 true
+  full_circle_min_coverage_deg: 330    # 覆盖角 ≥330° 且闭合度达标 → CIRCLE 实体
+  full_circle_close_tolerance_mm: 0.1  # 首尾点距离上限（否则降级 ARC）
+  min_segment_length_linewidths: 2.0   # 短于此的段不单独成实体，并入邻段
+  collinear_merge_tolerance_mm: 0.05   # 近似共线段合并
+  min_arc_radius_linewidths: 3.0       # 半径小于 3×线宽时按圆角/折线处理，不写 ARC
+  concentric_tolerance_mm: 0.1         # 同心判定容差
+  g1_tangent_tolerance_deg: 5          # 共享节点切线角差 >5° 时重分段或降级多段线
+  max_segments_per_curve: 64           # 单曲线分段上限，超出说明分段策略有问题
+
+
+# -----------------------------------------------------------------------------
+# S5 线宽恢复与分层（决定「像不像原图」）
+# -----------------------------------------------------------------------------
+linewidth:
+  cluster_method: "dbscan"             # dbscan | kde
+  cluster_levels_min: 3
+  cluster_levels_max: 5
+  cluster_eps_mm: 0.02                 # DBSCAN 邻域半径
+  snap_to_standard: true               # 就近吸附到标准笔宽，避免 0.184/0.186 分裂
+  standard_widths_mm: [0.13, 0.18, 0.25, 0.35, 0.50, 0.70, 1.00]
+  layer_name_decimals: 2               # 图层名 LINES_W0.35 的小数位
+  encode_width_in_layer: true          # 同时写入多段线全局宽度（mm）
+  layer_priority: ["linewidth", "orientation", "color", "position"]  # 分层依据优先级
+  orthogonalize_tolerance_deg: 2.0     # 偏离主轴 ≤2° 强制正交化（--orthogonalize）
+  fallback_polyline_ratio: 0.6         # 允许回退折线的边比例上限，超出写 WARN
+  border:                              # 图框/标题栏检测
+    detect: true
+    max_rect_area_ratio: 0.9           # 最大外接矩形占图幅比例上限
+    parallel_inset_tolerance_mm: 1.0   # 内侧平行线组的间距容差
+    layer: "BORDER"
+
+
+# -----------------------------------------------------------------------------
+# S6 文字分离与 OCR（文字层不参与几何精度验收，单独考核字符准确率）
+# -----------------------------------------------------------------------------
+text:
+  enable: true
+  min_height_mm: 1.5                   # 小于此高度不送 OCR（<8pt@300DPI 成功率显著下降）
+  max_height_mm: 20.0
+  separation:                          # 文字/线条分离判据（需同时满足才判为文字）
+    area_max_mm2: 50
+    aspect_ratio_max: 8.0
+    stroke_width_cv_max: 0.25          # 笔画宽度变异系数：文字窄，线条长而均匀
+    distance_to_skeleton_mm: 0.5
+  line_grouping:
+    xheight_band_ratio: 1.6            # 行合并的 x-height 带宽倍数
+    skew_correct: true                 # 倾斜行按投影剖面旋转校正
+    vertical_cjk: true                 # 竖排中文单独路径
+    keep_rotation: true
+  ocr:
+    engine: "paddle"                   # paddle | tesseract | none（插件化，可缺省）
+    fallback_engine: "tesseract"
+    lang: ["ch", "en"]
+    text_confidence_min: 0.6           # 低于此值只出掩膜、不写 TEXT，避免编造
+    anchor: "baseline_left"            # 定位取基线左端，禁止用外接矩形中心
+    height_from_xheight: true          # 字高由像素 x-height × DPI 反推为 mm
+    recognize_dimensions: false
+    recognize_tolerance: false
+    recognize_diameter_symbol: false
+  gap_by_text: true                    # 文字掩膜从骨架扣除，断口标记 gap_by_text
+
+
+# -----------------------------------------------------------------------------
+# S7 配准与尺度（未配准的输出尺寸无任何可信度，必须带警告）
+# -----------------------------------------------------------------------------
+registration:
+  mode: "two-point"                    # none | scale | two-point | affine | projective
+  scale_denominator: null              # mode=scale 时填 1:N 的 N（如 500）
+  two_point_min_distance_mm: 20        # 两点法：控制点最小间距，太近则角度误差爆炸
+  affine_min_control_points: 3
+  projective_min_control_points: 4
+  rms_warn_mm: 0.2                     # RMS 超此值写 WARN
+  rms_max_mm: 0.5                      # 超此值拒绝输出（fail_fast 时中止）
+  outlier_sigma: 3.0                   # 逐点残差超 Nσ 建议剔除，交互重算
+  projective_requires_perspective_accept: true   # 投影模式必须先接受透视畸变
+  uncalibrated_watermark: true         # 未配准则在 DXF 注释头与 GUI 打警告
+
+
+# -----------------------------------------------------------------------------
+# S8 DXF 输出（实体/图层契约详见 .dsh/skills/r2v-domain/dxf_rules.md）
+# -----------------------------------------------------------------------------
+dxf:
+  version: "R2018"
+  library: "ezdxf"
+  insunits: 4                          # 4 = 毫米
+  lunits: 2                            # 2 = 十进制
+  measurement: 1                       # 1 = 公制
+  angle_units: 0                       # 0 = 十进制角度
+  coordinate_decimals: 4               # 0.0001 mm，写出舍入 ≤0.01mm，不得成为误差源
+  angle_decimals: 4
+  verify_tolerance_mm: 0.001           # 写出后回读比对容差 1e-3 mm
+  verify_on_write: true                # 自检不一致 → 报错退出，不静默继续
+  layer_by_linewidth: true
+  orthogonalize: false                 # --orthogonalize / 建筑 preset 打开
+  detect_titleblock: true
+  detect_centerlines: true
+  detect_symmetry_axis: false
+  debug_layer_color: 252
+  layers:                              # 唯一真相源：dxf_writer.py 与 dxf_rules.md 均由此核对
+    - {name: "LINES_W0.18", color: 7, linetype: "CONTINUOUS"}
+    - {name: "LINES_W0.35", color: 4, linetype: "CONTINUOUS"}
+    - {name: "LINES_W0.50", color: 1, linetype: "CONTINUOUS"}
+    - {name: "ARCS", color: 3, linetype: "CONTINUOUS"}
+    - {name: "CIRCLES", color: 5, linetype: "CONTINUOUS"}
+    - {name: "TEXT", color: 6, linetype: "CONTINUOUS"}
+    - {name: "BORDER", color: 8, linetype: "CONTINUOUS"}
+    - {name: "CENTER", color: 2, linetype: "DASHED"}     # 中心线/点划线
+    - {name: "HIDDEN", color: 9, linetype: "HIDDEN"}     # 不可见轮廓线（机械图虚线）
+    - {name: "DEBUG", color: 252, linetype: "CONTINUOUS"} # 仅 --debug；颜色同步 dxf.debug_layer_color
+  comments_include: ["version", "config_hash", "manifest_id", "rms", "warnings", "capability_notice"]
+
+
+# -----------------------------------------------------------------------------
+# 图纸预设：预设只写「参数覆盖」，由 src/presets.py 按点路径 patch 到本文件之上
+# 完整清单与说明见 .dsh/skills/r2v-domain/presets.yaml
+# -----------------------------------------------------------------------------
+presets:
+  file: ".dsh/skills/r2v-domain/presets.yaml"
+  default: null                        # null = 不套预设，纯 base
+  validate_after_apply: true           # patch 后重新跑一遍 schema 校验
+  allow_unknown_keys: false            # 覆盖到 base 不存在的键 = 硬失败（防拼写漂移）
+  record_effective: true               # 把合并后的有效参数写入 manifest.json
