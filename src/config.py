@@ -291,9 +291,12 @@ class ResourcesConfig(_Section):
 class QcConfig(_Section):
     dpi_min: float = Field(..., gt=0)
     dpi_mode: DpiMode
+    fallback_dpi: float = Field(..., gt=0, description="元数据缺失时的兜底 DPI（SPEC §1.1：默认 300 并 WARN）")
     budget_reference_dpi: float = Field(..., gt=0)
     sharpness_min: float = Field(..., ge=0)
     skew_max_deg: float = Field(..., ge=0, lt=90)
+    skew_search_deg: float = Field(..., gt=0, lt=45, description="投影法搜索范围（±）")
+    skew_prominence_min: float = Field(..., gt=0, description="投影峰显著性下限，低于则判不可信")
     perspective_max_deviation: float = Field(..., ge=0)
     jpeg_ring_artifact_detect: bool
     moire_detect: bool

@@ -496,6 +496,53 @@ def check_budget_rows(root: Path, skill_dir: Path) -> None:
         )
 
 
+def check_licenses(root: Path) -> None:
+    """docs/LICENSES.md 必须在、必须覆盖 requirements.txt 的每个依赖、UNKNOWN 必须进清单。"""
+    check = "licenses"
+    licenses = root / "docs" / "LICENSES.md"
+    if not licenses.is_file():
+        err(check, f"缺少 {licenses.relative_to(root).as_posix()}（SPEC §2 交付物：依赖名/版本/许可证/来源）")
+        return
+
+    text = licenses.read_text(encoding="utf-8")
+    rows: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 4:
+            continue
+        name = cells[0].strip("`")
+        if name in ("包", "") or set(name) <= {"-", ":"}:
+            continue
+        if name in rows:
+            err(check, f"{name} 在许可证表里重复出现")
+        rows[name] = cells
+        if not cells[2] or cells[2] not in ("UNKNOWN",) and " " not in cells[2] and cells[2] == "":
+            err(check, f"{name} 的 SPDX 列为空")
+
+    req = root / "requirements.txt"
+    if req.is_file():
+        declared: list[str] = []
+        for raw in req.read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if "==" in line:
+                declared.append(line.split("==", 1)[0].strip())
+        missing = sorted({n for n in declared if n not in rows})
+        if missing:
+            err(check, f"LICENSES.md 缺少这些依赖（requirements.txt 里有）：{missing}")
+
+    unknown = sorted(n for n, c in rows.items() if len(c) > 2 and c[2] == "UNKNOWN")
+    confirm = text.split("待人工确认", 1)[1] if "待人工确认" in text else ""
+    for name in unknown:
+        if name not in confirm:
+            err(check, f"{name} 标为 UNKNOWN 但未出现在「待人工确认」清单里")
+    if unknown:
+        warn(check, f"{len(unknown)} 个依赖 SPDX 未知，已列入待人工确认：{unknown}")
+    if not rows:
+        err(check, "许可证表里没有任何依赖行")
+
+
 def report(root: Path) -> int:
     errors = [msg for level, msg in problems if level == "ERROR"]
     warnings = [msg for level, msg in problems if level == "WARN"]
@@ -614,6 +661,7 @@ def main() -> int:
     check_doc_hygiene(skill_dir)
     check_referenced_paths(root, skill_dir)
     check_budget_rows(root, skill_dir)
+    check_licenses(root)
     return report(root)
 
 

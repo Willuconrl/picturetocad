@@ -37,8 +37,11 @@ qc:
   dpi_min: 200                    # 低于此值：mode=reject 则退出；=warn 打标记继续；=degrade 继续但放大误差预算
   dpi_mode: degrade               # reject | warn | degrade | ignore（degrade=继续 + WARN + 预算按 true_dpi 放大）
   budget_reference_dpi: 300       # 误差预算基准（SPEC §1.2）；低 DPI 图实际 mm 预算 × (budget_reference_dpi/true_dpi)
+  fallback_dpi: 300               # 元数据（EXIF/pHYs/TIFF）缺失时的兜底 DPI；SPEC §1.1 要求 WARN 后再用
   sharpness_min: 0.25             # 边缘自相关估计的锐度指标；低于此说明「标称高分辨率实际模糊」
   skew_max_deg: 3.0               # 页面倾斜超过此值自动旋转校正
+  skew_search_deg: 5.0            # 倾斜搜索范围 ±（投影轮廓法）；超出此范围视为无主向
+  skew_prominence_min: 8.0        # 投影峰显著性 = 峰值/中位数；低于此判"无可信主轴"（实测：网格 17–35、圆形零件 4.3、单线 1.9、截图 1.2）
   perspective_max_deviation: 0.02 # 四边检测的直线汇聚度；超限建议 projective 配准或拒绝
   jpeg_ring_artifact_detect: true # 检测 JPEG 压缩环/块效应
   moire_detect: true              # 频谱峰值检测半调网点/莫尔纹

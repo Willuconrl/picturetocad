@@ -259,10 +259,17 @@ def render_scene(scene: Scene) -> np.ndarray:
 
 
 def render_png_bytes(scene: Scene) -> bytes:
-    ok, buf = cv2.imencode(".png", render_scene(scene))
-    if not ok:
-        raise RuntimeError(f"PNG 编码失败：{scene.name}")
-    return bytes(buf.tobytes())
+    """PNG 字节。用 Pillow 写，**带上 DPI 元数据**（pHYs）——真实扫描件都有，
+    且 S0 质检从这里读 DPI；cv2.imencode 不写 pHYs。
+    """
+    import io
+
+    from PIL import Image
+
+    image = Image.fromarray(render_scene(scene))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", dpi=(scene.dpi, scene.dpi))
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------

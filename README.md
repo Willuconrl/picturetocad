@@ -30,11 +30,13 @@ python scripts/verify_wheels.py --check      # 校验锁定版本在 cp310-manyl
 ## 用法
 
 ```bash
-python -m src --check-config                            # 校验 config.yaml 后退出（非法值启动即失败）
-python -m src --check-config --preset blueprint         # 套用预设后校验
-python -m src --print-effective --preset mechanical     # 打印合并后的有效参数 + config_hash
-python -m src --list-presets                            # 列出四套预设
+r2v --check-config                            # 校验 config.yaml 后退出（非法值启动即失败）
+r2v --check-config --preset blueprint         # 套用预设后校验
+r2v --print-effective --preset mechanical     # 打印合并后的有效参数 + config_hash
+r2v --list-presets                            # 列出四套预设
 ```
+
+未安装时等价写法：`python -m src --check-config`（开发模式 `pip install -e .` 后 `r2v` 直接可用）。
 
 退出码：`0` 成功；`2` 配置/预设非法。
 
@@ -46,6 +48,7 @@ python -m src --list-presets                            # 列出四套预设
 | `tests/` | pytest 用例 + hypothesis 性质测试 + 合成图夹具 |
 | `test_images/` | 输入图与 `manifest.csv`（七列：`file, preset, true_dpi, page_class, golden_dxf, notes, has_golden`） |
 | `golden/` | 手工描/程序生成的正确 DXF，用于回归比对 |
+| `docs/` | `LICENSES.md`：依赖许可证清单（由 `scripts/gen_licenses.py` 从已安装 metadata 生成） |
 | `outputs/` | 运行时产物：`metrics_<stage>.json`、`manifest.json`、`debug/overlay_*.png` |
 | `specs/` | `SPEC.md`：误差预算与逐阶段验收标准（真相源） |
 
@@ -57,7 +60,9 @@ python -m src --list-presets                            # 列出四套预设
 - **M0-a 完成**：`manifest.csv` schema、合成图 + golden 回归框架、依赖锁定与 wheel 校验。
 - **M0-b 完成**：`config.yaml` 的 pydantic-settings schema、预设覆盖与重校验、`src/coords.py`
   坐标变换、`src/artifacts.py` 产物契约、`r2v` CLI 骨架、DXF 比特级可复现（`src/dxf_repro.py`）。
-- 后续：S0 质检 → S1 预处理 → … → S8 组装（见 `specs/SPEC.md` §4）。
+- **M1 完成**：`src/s0_qc.py`（DPI/锐度/倾斜/光照 + `qc_report.json` + degrade 预算放大）、
+  可安装包与控制台入口 `r2v`、`docs/LICENSES.md`。
+- 后续：S1 预处理 → S2 二值化+亚像素 → … → S8 组装（见 `specs/SPEC.md` §4）。
 
 ## TODO
 

@@ -1,4 +1,23 @@
 # pyproject.toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "r2v-tool"
+version = "0.2.0.dev0"
+description = "光栅图纸转 CAD（DXF）矢量化工具（精度优先）"
+requires-python = ">=3.10"
+# 依赖版本只在 requirements.txt 里锁定（唯一真相源），此处不重复声明，避免两处漂移。
+# 安装顺序：python -m pip install -r requirements.txt && python -m pip install -e .
+dependencies = []
+
+[project.scripts]
+r2v = "src.cli:main"
+
+[tool.setuptools]
+packages = ["src"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
