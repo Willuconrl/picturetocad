@@ -118,7 +118,7 @@ def test_spurious_curvature_is_suppressed(metrics: dict[str, float]) -> None:
 
 
 def test_linewidth_estimate_within_tolerance(metrics: dict[str, float]) -> None:
-    """S2 全局线宽高估不得超过 1.30×（当前 1.20×，为 S2 修复预留空间）。"""
-    assert metrics["linewidth_overestimate"] <= 1.30, (
-        f"线宽高估 {metrics['linewidth_overestimate']:.3f}× > 1.30：S2 全局线宽估计退化"
+    """S2 全局线宽高估不得超过 1.05×（M8-3 EDT 改造后实测 1.0147×）。"""
+    assert metrics["linewidth_overestimate"] <= 1.05, (
+        f"线宽高估 {metrics['linewidth_overestimate']:.3f}× > 1.05：S2 全局线宽估计退化"
     )
