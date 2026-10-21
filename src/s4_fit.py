@@ -948,7 +948,13 @@ def _enforce_g1(
     limit_deg: float,
     warnings: list[str],
 ) -> list[Primitive]:
-    """共享节点处切线角差 > limit 时，把参与的非直线基元降级为多段线。"""
+    """共享节点处切线角差 > limit 时，把参与的非直线基元降级为多段线。
+
+    **只对"应当光滑连续"的节点生效**：S3 判成 `corner` 的节点本来就是折角（折线/多边形的
+    拐点），切线不连续是**设计意图**，不能因此把合法的弧降级成折线
+    （实测 bulge 场景的「直线+弧」被 G1 误判，整条弧退化成了折线）。
+    """
+    corner_nodes = {node.id for node in graph.nodes if node.type == "corner"}
     by_node: dict[int, list[Primitive]] = {}
     for primitive in primitives:
         for node_id, at_start in ((primitive.node_a, True), (primitive.node_b, False)):
@@ -956,7 +962,7 @@ def _enforce_g1(
                 by_node.setdefault(node_id, []).append(primitive)
     degraded: set[int] = set()
     for node_id, group in sorted(by_node.items()):
-        if len(group) < 2:
+        if len(group) < 2 or node_id in corner_nodes:
             continue
         tangents = []
         for primitive in group:

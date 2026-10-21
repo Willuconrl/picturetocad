@@ -299,12 +299,15 @@ def _polyline_length(e: GeomPolyline, *, spacing_mm: float) -> float:
 def entity_metrics(e: GeomEntity, *, spacing_mm: float) -> dict[str, tuple[float, MetricKind]]:
     """实体的关键尺寸字典：名字 → (值, 该值按相对误差比还是绝对 mm 比)。"""
     if isinstance(e, GeomLine):
+        # 端点的**先后顺序不是几何信息**：管线可能把线反着写。
+        # 不归一化的话 x0 会拿我们的终点去比 golden 的起点（实测 44mm 的假误差）。
+        start, end = sorted((e.start, e.end))
         return {
             "length": (float(np.linalg.norm(np.subtract(e.end, e.start))), "rel"),
-            "x0": (e.start[0], "abs"),
-            "y0": (e.start[1], "abs"),
-            "x1": (e.end[0], "abs"),
-            "y1": (e.end[1], "abs"),
+            "x0": (start[0], "abs"),
+            "y0": (start[1], "abs"),
+            "x1": (end[0], "abs"),
+            "y1": (end[1], "abs"),
         }
     if isinstance(e, GeomCircle):
         return {

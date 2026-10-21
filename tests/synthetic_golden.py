@@ -59,7 +59,7 @@ Point = tuple[float, float]
 class LineSpec:
     start: Point
     end: Point
-    layer: str = "LINES_W0.35"
+    layer: str = "LINES_W0.50"
 
     def __post_init__(self) -> None:
         if self.start == self.end:
@@ -101,7 +101,7 @@ class PolylineSpec:
     points: tuple[Point, ...]
     bulges: tuple[float, ...] = ()
     closed: bool = False
-    layer: str = "LINES_W0.35"
+    layer: str = "LINES_W0.50"
 
     def __post_init__(self) -> None:
         if len(self.points) < 2:
@@ -235,27 +235,53 @@ def to_pixel_coords(points_mm: np.ndarray, scene: Scene) -> np.ndarray:
     return out
 
 
+def _distance_to_segment(
+    gx: np.ndarray, gy: np.ndarray, x0: float, y0: float, x1: float, y1: float
+) -> np.ndarray:
+    """点集到线段的距离（向量化）。"""
+    dx, dy = x1 - x0, y1 - y0
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-12:
+        return np.hypot(gx - x0, gy - y0)
+    t = np.clip(((gx - x0) * dx + (gy - y0) * dy) / length_sq, 0.0, 1.0)
+    return np.hypot(gx - (x0 + t * dx), gy - (y0 + t * dy))
+
+
 def render_scene(scene: Scene) -> np.ndarray:
-    """把 Scene 渲染成 uint8 灰度图（背景 255、线 0）。纯确定性，不含随机。"""
+    """把 Scene 渲染成 uint8 灰度图（背景 255、线 0）。纯确定性，不含随机。
+
+    **解析覆盖率光栅化**（M7 fixture v2）：像素覆盖率 =
+    `clamp(半径 + 0.5 − 到线段的距离, 0, 1)`，与 golden DXF 共用同一条解析链，
+    因此"图—矢量"两侧真值一致。
+
+    为什么不用 `cv2.polylines(lineType=cv2.LINE_AA)`：实测其 50% 墨宽恒为
+    `thickness + 3`（3→5.98px、6→7.98px），名义线宽与物理墨宽差 0.13mm，
+    会直接把 golden 的图层标签带错。
+    """
     width_px, height_px = scene.pixel_size()
-    canvas = np.full((height_px, width_px), 255, dtype=np.uint8)
-    scale = 1 << SHIFT_BITS
+    ink = np.zeros((height_px, width_px), dtype=np.float64)
+    radius = scene.line_width_px / 2.0
     for spec in scene.specs:
         chain_mm, closed = spec_chain(spec, scene)
-        px = to_pixel_coords(chain_mm, scene) * scale
-        ints = np.round(px).astype(np.int32)
-        if len(ints) < 2:
-            continue
-        cv2.polylines(
-            canvas,
-            [ints],
-            isClosed=closed,
-            color=0,
-            thickness=scene.line_width_px,
-            lineType=cv2.LINE_AA,
-            shift=SHIFT_BITS,
-        )
-    return canvas
+        points = to_pixel_coords(np.asarray(chain_mm, dtype=np.float64), scene)
+        segments = list(zip(points[:-1], points[1:]))
+        if closed and len(points) > 2:
+            segments.append((points[-1], points[0]))
+        for (x0, y0), (x1, y1) in segments:
+            pad = radius + 1.0
+            col0 = max(0, int(np.floor(min(x0, x1) - pad)))
+            col1 = min(width_px, int(np.ceil(max(x0, x1) + pad)) + 1)
+            row0 = max(0, int(np.floor(min(y0, y1) - pad)))
+            row1 = min(height_px, int(np.ceil(max(y0, y1) + pad)) + 1)
+            if col1 <= col0 or row1 <= row0:
+                continue
+            ys, xs = np.mgrid[row0:row1, col0:col1]
+            gx = xs + 0.5      # 像素中心（连续坐标契约：像素 i 覆盖 [i, i+1)）
+            gy = ys + 0.5
+            distance = _distance_to_segment(gx, gy, x0, y0, x1, y1)
+            coverage = np.clip(radius + 0.5 - distance, 0.0, 1.0)
+            ink[row0:row1, col0:col1] = np.maximum(ink[row0:row1, col0:col1], coverage)
+    return np.round(255.0 * (1.0 - ink)).astype(np.uint8)
 
 
 def render_png_bytes(scene: Scene) -> bytes:
@@ -325,7 +351,7 @@ def all_scenes() -> tuple[Scene, ...]:
             width_mm=40.0,
             height_mm=40.0,
             dpi=300.0,
-            line_width_px=3,
+            line_width_px=6,
             specs=(CircleSpec(center=(20.0, 20.0), radius=12.0),),
             note="完整圆 r=12mm，用于 CIRCLE 判定与半径相对误差",
         ),
@@ -334,7 +360,7 @@ def all_scenes() -> tuple[Scene, ...]:
             width_mm=60.0,
             height_mm=30.0,
             dpi=300.0,
-            line_width_px=3,
+            line_width_px=6,
             specs=(LineSpec(start=(8.0, 10.0), end=(52.0, 20.0)),),
             note="单条斜线 (8,10)-(52,20)，用于端点误差与长度相对误差",
         ),
@@ -343,7 +369,7 @@ def all_scenes() -> tuple[Scene, ...]:
             width_mm=40.0,
             height_mm=40.0,
             dpi=300.0,
-            line_width_px=3,
+            line_width_px=6,
             specs=(
                 ArcSpec(center=(20.0, 20.0), radius=15.0, start_deg=30.0, end_deg=150.0),
             ),
@@ -354,7 +380,7 @@ def all_scenes() -> tuple[Scene, ...]:
             width_mm=50.0,
             height_mm=40.0,
             dpi=300.0,
-            line_width_px=3,
+            line_width_px=6,
             specs=(
                 PolylineSpec(
                     points=((10.0, 10.0), (30.0, 10.0), (40.0, 25.0)),

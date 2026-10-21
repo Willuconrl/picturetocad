@@ -1615,7 +1615,7 @@ AcDbSymbolTableRecord
 100
 AcDbLayerTableRecord
   2
-LINES_W0.35
+LINES_W0.50
  70
 0
  62
@@ -2059,7 +2059,7 @@ LINE
 100
 AcDbEntity
   8
-LINES_W0.35
+LINES_W0.50
 100
 AcDbLine
  10
