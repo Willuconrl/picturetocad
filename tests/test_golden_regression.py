@@ -49,8 +49,11 @@ DIM_REL_TOL = 0.005
 
 #: 实测偏差（M7-Golden 各轮修复后），用于把 xfail 的原因写清楚
 MEASURED = {
-    "synthetic_polyline_bulge": "P95=8.090px、1 ARC + 3 LINE vs 1 LINE + 1 ARC、图层 LINES_W0.35 vs 0.50"
-    "（直线段被切成 3 条 + 宽档归错，专项修复中）",
+    "synthetic_polyline_bulge": "P95=8.090px、1 ARC + 3 LINE vs 1 LINE + 1 ARC、图层 LINES_W0.35 vs 0.50。"
+    "**切点判据已两次尝试均失败**：① 枚举切点+最小总 SSE → 直线侧被判成巨弧（P95 94.5px）；"
+    "② 离散曲率突变点（阈值 0.5/线宽）→ 同样落成 2 个 ARC（P95 96.5px）。"
+    "残留误差来源待查：疑似 S2 掩膜在弧↔直线过渡区的连通性，或 S3 该边的中心线在过渡处不光滑。"
+    "决定按已知限制收口（M7 = 3/4 绿），留待专项。",
 }
 
 #: 已全部达标的场景（不挂 xfail）
