@@ -96,6 +96,11 @@ class GraphEdge(_Model):
     linewidth_px: float
     bridged: bool = False
     closed: bool = False
+    closed_loop: bool = Field(
+        default=False,
+        description="整条边是一个闭合环（图框/窗洞轮廓）。S8 读它写单条 closed=True 的 LWPOLYLINE，"
+        "而不是拆成若干独立 LINE——闭合语义在 CAD/CAM 里是有意义的拓扑。",
+    )
 
 
 class TopologyGraph(_Model):
@@ -901,6 +906,7 @@ def run_s3_skeleton(
                 linewidth_px=round(edge["linewidth"], 4),
                 bridged=bool(edge["bridged"]),
                 closed=bool(edge["closed"]),
+                closed_loop=bool(edge["closed"]),
             )
         )
 

@@ -511,10 +511,15 @@ class DXFWriter:
 
     def save(self, filepath: str | Path, *,
              manifest_id: str = "", config_hash: str = "", rms_mm: float | None = None,
-             debug: bool = False) -> dict[str, Any]:
+             debug: bool = False, project_name: str | None = None,
+             write_metrics: bool = True) -> dict[str, Any]:
         """
         写出 -> 关闭 -> 回读自检（逐实体比对几何）-> 产出 metrics。
         自检失败：抛 DXFSelfCheckError（exit_code = 3，契约第 5 条）。
+
+        `project_name`：显式指定 `$PROJECTNAME`（S8 的未配准水印用），默认仍写元数据串。
+        `write_metrics=False`：由调用方（S8）自己写 `metrics_s8.json`（StageMetrics 格式），
+        避免与本方法的报告互相覆盖。
         """
         t0 = time.perf_counter()
         path = Path(filepath)
@@ -531,7 +536,7 @@ class DXFWriter:
 
         # 元数据落点（实测可落盘并回读）。$COMMENTS 不是合法头变量，别再用。
         self.doc.header["$LASTSAVEDBY"] = f"R2V | {manifest_id} | {config_hash}"[:255]
-        self.doc.header["$PROJECTNAME"] = meta[:255]
+        self.doc.header["$PROJECTNAME"] = (project_name or meta)[:255]
         try:
             self.doc.header.custom_vars.append("R2V_META", meta[:255])
         except Exception as exc:  # 自定义变量不是必须项，失败不致命但要留痕
@@ -558,7 +563,8 @@ class DXFWriter:
 
         # 落盘指标（约定文件名 metrics_<stage>.json，S8 阶段）
         metrics_path = path.with_name("metrics_s8.json")
-        metrics_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if write_metrics:
+            metrics_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if debug:
             self._write_debug_report(path.with_name("dxf_report.txt"), report)

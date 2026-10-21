@@ -61,6 +61,7 @@ def _pipeline(image: np.ndarray, cfg: R2VConfig, *, tmp: Path | None = None, pag
         contours=s2.edges.contours,
         mm_per_px=MM_PER_PX,
         page_size_px=page or (image.shape[1], image.shape[0]),
+        graph=s3.graph,
         out_dir=tmp,
     )
 
@@ -108,14 +109,8 @@ def test_snap_to_standard_widths(cfg: R2VConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 判据 ③：图框识别
+# 判据 ③：图框识别（闭合环路径：S3 标 closed_loop → S5 按整条边取外接框）
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(
-    reason="已知缺陷：S3 闭合环（图框矩形）的拐点切分不完整——矩形被切成 3 条边而不是 4 条，"
-           "其中一条跨了两个边（实测一条 648px 的边内含一个 90° 拐角未切开），"
-           "S5 因此凑不出 4 条正交线，图框识别失败。",
-    strict=False,
-)
 def test_border_is_detected_and_layered(cfg: R2VConfig) -> None:
     def draw(big, s):
         cv2.rectangle(
@@ -132,11 +127,6 @@ def test_border_is_detected_and_layered(cfg: R2VConfig) -> None:
     assert layer.counts_by_layer.get("BORDER", 0) == len(border_assignments)
 
 
-@pytest.mark.xfail(
-    reason="同上：小矩形同样被切成 3 条边，`detect_border` 还没走到面积占比判断就返回空，"
-           "因此没有『面积占比』WARN。",
-    strict=False,
-)
 def test_border_not_detected_for_small_rectangle(cfg: R2VConfig) -> None:
     def draw(big, s):
         cv2.rectangle(big, (int(120 * s), int(100 * s)), (int(280 * s), int(200 * s)), 0, int(4 * s))

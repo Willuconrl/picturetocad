@@ -74,8 +74,10 @@ r2v --list-presets                            # 列出四套预设
   BIC+F 检验竞争 → 完整圆判定 → G1 复检 → LWPOLYLINE 回退 + `primitives.json`/`metrics_s4.json`）。
 - **M6 部分完成**：`src/s7_register.py`（四种配准模式 + 稳健离群剔除 + `transform.json`/`metrics_s7.json`）
   四条判据全过；`src/s5_layer.py`（逐基元测宽 → 聚类 → 标准笔宽吸附 → 分层 → 图框 → 正交化）
-  五条判据中 ②④⑤ 通过，①③ 见下"已知限制"。
-- 后续：S6 OCR + S8 DXF 组装 + Golden 回归（M7，见 `specs/SPEC.md` §4）。
+  五条判据全部通过。
+- **M7-S8 完成**：`src/s8_dxf.py`（LINE/ARC/CIRCLE/LWPOLYLINE + 闭合环映射 + 回读自检 +
+  未配准水印 + `metrics_s8.json`）；S3 的边新增 `closed_loop` 标注；S5 图框改按闭合边整体判定。
+- 后续：Golden 回归框架 → S6 OCR（见 `specs/SPEC.md` §4）。
 
 ## 已知限制
 
@@ -92,9 +94,9 @@ r2v --list-presets                            # 列出四套预设
   0.058 mm > 0.02 mm）；4.1 px / 5.9 px 档仅 +0.11 / +0.16 px。根因在 S2：细笔画的二值掩膜
   把半墨像素也判进来，轮廓点落在掩膜边界而不是 50% 电平处。修复点在 `_edge_offset` 的
   双向搜索，会影响已验收的 S2 指标，需单独决策。
-- **闭合多边形（图框）的拐点切分**未完成（S5 判据③）：8 连通环的追踪可能退化成螺旋，
-  强行在拐点切开会把圆切成 4 段（实测 S4 因此测不出 CIRCLE）。当前策略是"闭合环不切"，
-  代价是图框矩形被当成一条曲线，S5 凑不出 4 条正交线。计划在 M7 与 S8 一起处理。
+- **闭合多边形（图框）的处理**：S3 把闭合环标成 `closed_loop`，S4 整条输出一条闭合多段线，
+  S5 按整条边取外接框判图框，S8 写成单条 `closed=True` 的 LWPOLYLINE。代价是闭合多边形内部
+  不再拆成独立 LINE/ARC——图框这类对象本来就应该保持闭合语义。
 
 ## TODO
 

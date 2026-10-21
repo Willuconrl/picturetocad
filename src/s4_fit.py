@@ -52,7 +52,7 @@ from src.s3_skeleton import TopologyGraph
 PrimitiveKind = Literal["line", "arc", "circle", "lwpolyline"]
 
 _MIN_DP_TOLERANCE_PX = 0.3     # DP 容差下限：再小就是在拟合像素噪声
-_MIN_CIRCLE_POINTS = 8         # 圆拟合最少点数
+_MIN_CIRCLE_POINTS = 5         # 圆拟合最少点数（DP 简化后短弧只剩 5–6 点，不能要求 8）
 _MIN_SEGMENT_POINTS = 3        # 单段最少点数
 _MAX_SPLIT_DEPTH = 12          # 递归切分深度上限（防病态输入爆栈）
 #: 段端点吸附到图节点的距离阈值：中心线两端各裁掉 1×线宽，所以接头处端点天生离节点
@@ -458,6 +458,7 @@ def split_and_fit(
     alpha: float,
     prefer_arcs: bool,
     max_segments: int,
+    arc_tolerance_px: float | None = None,
     depth: int = 0,
 ) -> tuple[list[_Segment], list[str]]:
     """递归分段拟合：整段残差超限就在最大残差点切开。"""
@@ -479,17 +480,22 @@ def split_and_fit(
     residuals = _residuals(model, points)
     # 接受判据用 **RMS**（对外宣称的拟合精度），切分位置用最大残差点。
     # 用 max 做接受判据会把"局部噪声大一点"的整条弧误切（实测 120° 弧被切成 3 段）。
-    if model.rms <= tolerance_px or len(points) < 2 * _MIN_SEGMENT_POINTS:
+    # 圆弧的容差比直线宽：小半径弧上同样的半径误差会产生更大的弦高偏差，
+    # 用直线的 1px 容差会把 R=40 的合法弧切成若干段直线（实测 rms 3.1px 被切）。
+    limit = tolerance_px if kind == "line" else float(arc_tolerance_px or tolerance_px)
+    if model.rms <= limit or len(points) < 2 * _MIN_SEGMENT_POINTS:
         return [_Segment(points=points, model=model, kind=kind)], warnings
     split_index = int(np.argmax(residuals))
     split_index = min(max(split_index, _MIN_SEGMENT_POINTS), len(points) - _MIN_SEGMENT_POINTS)
     left, left_warnings = split_and_fit(
         points[: split_index + 1], tolerance_px=tolerance_px, alpha=alpha,
-        prefer_arcs=prefer_arcs, max_segments=max_segments, depth=depth + 1,
+        prefer_arcs=prefer_arcs, max_segments=max_segments,
+        arc_tolerance_px=arc_tolerance_px, depth=depth + 1,
     )
     right, right_warnings = split_and_fit(
         points[split_index:], tolerance_px=tolerance_px, alpha=alpha,
-        prefer_arcs=prefer_arcs, max_segments=max_segments, depth=depth + 1,
+        prefer_arcs=prefer_arcs, max_segments=max_segments,
+        arc_tolerance_px=arc_tolerance_px, depth=depth + 1,
     )
     warnings.extend(left_warnings)
     warnings.extend(right_warnings)
@@ -593,20 +599,29 @@ def run_s4_fit(
         if len(simplified) < 2:
             discarded += 1
             continue
+        # 拟合点：DP 简化后的转折点（容差 1px）。注意 DP 会把短弧压到 5–6 个点，
+        # 所以 `_MIN_CIRCLE_POINTS` 必须 ≤5，否则合法圆弧会被迫走直线分支。
+        fit_points = simplified
+        simplified = np.asarray(
+            douglas_peucker([tuple(p) for p in centerline], tolerance_px), dtype=np.float64
+        )
+        if len(simplified) < 2:
+            discarded += 1
+            continue
 
-        # 闭合边优先判完整圆
+        # 闭合边优先判完整圆（用稠密点，保证点数够）
         if edge.closed:
-            circle = fit_circle(simplified) if len(simplified) >= _MIN_CIRCLE_POINTS else None
+            circle = fit_circle(fit_points) if len(fit_points) >= _MIN_CIRCLE_POINTS else None
             if circle is not None:
                 angles = [
                     math.degrees(math.atan2(p[1] - circle.center[1], p[0] - circle.center[0])) % 360.0
-                    for p in simplified
+                    for p in fit_points
                 ]
                 gap = _angle_gap_deg(angles)
                 coverage = 360.0 - gap
                 closure = float(
                     math.hypot(
-                        simplified[0][0] - simplified[-1][0], simplified[0][1] - simplified[-1][1]
+                        fit_points[0][0] - fit_points[-1][0], fit_points[0][1] - fit_points[-1][1]
                     )
                 )
                 if (
@@ -629,13 +644,26 @@ def run_s4_fit(
                         reason=f"closed coverage={coverage:.1f}deg closure={closure:.3f}px",
                     )
                     continue
+            # 闭合边但不是完整圆：**整条写成一条闭合多段线**，不拆成若干段。
+            # 拆开会让图框丢失闭合语义（CAD/CAM 认不出封闭轮廓），逐段拟合还会把
+            # 矩形拟成 rms 0.9px 的"圆弧"。闭合语义由 S3 的 closed_loop 标注、S8 写出。
+            emit(
+                kind="lwpolyline",
+                points=tuple((round(float(p[0]), 4), round(float(p[1]), 4)) for p in simplified),
+                length_px=round(polyline_length(simplified), 4),
+                rms_px=round(circle.rms if circle is not None else 0.0, 4),
+                source_edge_ids=(edge.id,),
+                reason="closed_loop_not_circle",
+            )
+            continue
 
         segments, segment_warnings = split_and_fit(
-            simplified,
+            fit_points,
             tolerance_px=tolerance_px,
             alpha=alpha,
             prefer_arcs=bool(fitting.prefer_arcs),
             max_segments=int(fitting.max_segments_per_curve),
+            arc_tolerance_px=max(tolerance_px, 0.5 * arc_residual_px),
         )
         warnings.extend(segment_warnings)
         if not segments:

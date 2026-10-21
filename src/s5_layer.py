@@ -36,6 +36,7 @@ from scipy.spatial import cKDTree
 
 from src.artifacts import StageMetrics, write_json, write_metrics
 from src.config import R2VConfig
+from src.s3_skeleton import TopologyGraph
 from src.s4_fit import FitResult, Primitive
 
 #: 图框矩形面积占页面比例的下限（低于此认为不是图框，而是零散线条）
@@ -302,6 +303,55 @@ def detect_border(
     return [top.id, bottom.id, left.id, right.id], warnings
 
 
+def detect_border_closed_loops(
+    primitives: Sequence[Primitive],
+    graph: TopologyGraph | None,
+    *,
+    page_size_px: tuple[int, int],
+    max_area_ratio: float,
+) -> tuple[list[int], list[str]]:
+    """闭合环（图框/窗洞）判定：整条 `closed_loop` 边的外接矩形面积占比落在区间内即为图框。
+
+    S3 的闭合环是一条边、S4 可能把它切成若干段，所以这里按 `source_edge_ids` **整条**取
+    外接框，而不是逐基元判断——逐基元的话四条边各占一窄条，永远凑不出矩形面积。
+    """
+    if graph is None:
+        return [], []
+    width, height = page_size_px
+    if width <= 0 or height <= 0:
+        raise LayerError(f"page_size_px 非法：{page_size_px}")
+    warnings: list[str] = []
+    closed_edges = {edge.id for edge in graph.edges if getattr(edge, "closed_loop", False)}
+    if not closed_edges:
+        return [], []
+    grouped: dict[int, list[Primitive]] = {}
+    for primitive in primitives:
+        for edge_id in primitive.source_edge_ids:
+            if edge_id in closed_edges:
+                grouped.setdefault(edge_id, []).append(primitive)
+                break
+    border_ids: list[int] = []
+    for edge_id, members in sorted(grouped.items()):
+        xs: list[float] = []
+        ys: list[float] = []
+        for primitive in members:
+            for point in (primitive.start, primitive.end, *(primitive.points or ())):
+                if point is not None:
+                    xs.append(float(point[0]))
+                    ys.append(float(point[1]))
+        if not xs or not ys:
+            continue
+        area_ratio = (max(xs) - min(xs)) * (max(ys) - min(ys)) / float(width * height)
+        if _BORDER_AREA_RATIO_MIN <= area_ratio <= max_area_ratio:
+            border_ids.extend(p.id for p in members)
+        else:
+            warnings.append(
+                f"闭合环 边{edge_id} 面积占比 {area_ratio:.3f} 不在 "
+                f"[{_BORDER_AREA_RATIO_MIN}, {max_area_ratio}]：不判为图框"
+            )
+    return border_ids, warnings
+
+
 def orthogonalize_lines(
     primitives: Sequence[Primitive],
     *,
@@ -364,9 +414,13 @@ def run_s5_layer(
     contours: Sequence[np.ndarray],
     mm_per_px: float,
     page_size_px: tuple[int, int] | None = None,
+    graph: TopologyGraph | None = None,
     out_dir: str | Path | None = None,
 ) -> tuple[LayerResult, StageMetrics]:
-    """S5 主流程：测宽 → 聚类 → 吸附 → 分层 → 图框 → 正交化。"""
+    """S5 主流程：测宽 → 聚类 → 吸附 → 分层 → 图框 → 正交化。
+
+    `graph` 传入时，图框优先按 S3 的 `closed_loop` 边整体判定（推荐）。
+    """
     t0 = time.perf_counter()
     linewidth_cfg = cfg.linewidth
     if mm_per_px <= 0:
@@ -422,6 +476,15 @@ def run_s5_layer(
     assignments: list[LayerAssignment] = []
     border_ids: tuple[int, ...] = ()
     if page_size_px is not None:
+        closed_ids, closed_warnings = detect_border_closed_loops(
+            fit.primitives,
+            graph,
+            page_size_px=page_size_px,
+            max_area_ratio=float(linewidth_cfg.border.max_rect_area_ratio),
+        )
+        border_ids = tuple(closed_ids)
+        warnings.extend(closed_warnings)
+    if page_size_px is not None and not border_ids:
         border_ids, border_warnings = detect_border(
             fit.primitives,
             page_size_px=page_size_px,
