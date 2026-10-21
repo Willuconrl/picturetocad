@@ -40,6 +40,49 @@ r2v --list-presets                            # 列出四套预设
 
 退出码：`0` 成功；`2` 配置/预设非法。
 
+### 端到端转换
+
+```bash
+r2v convert --image test_images/synthetic_line_single.png --out outputs/run1
+```
+
+产物：`drawing.dxf` + 各阶段 `metrics_*.json` + `pending_ocr_regions.json` /
+`pending_ocr_lines.json` + `debug/overlay_s6.png`。**OCR 引擎缺失时 stderr 会打印
+`OCR skipped: pending implementation` 之类的提示，不会静默跳过。**
+
+### OCR 可选依赖
+
+文字识别是**可选能力**：不装也能跑完整几何链路，只是不产生 TEXT 实体。
+
+```bash
+python -m pip install -r requirements-ocr.txt      # 需要联网，约数百 MB（含 paddle 基座）
+```
+
+| 引擎 | 包 | 版本约束 | 说明 |
+|---|---|---|---|
+| paddle（首选） | `paddleocr` + `paddlepaddle` | `>=3.7.0,<3.8.0` / `>=3.0.0` | Apache-2.0；纯 Python wheel；传递依赖 `paddlex` 上限 `<3.8.0` 必须同步 |
+| tesseract（降级） | `pytesseract` | `>=0.3.13,<0.4` | Apache-2.0；**还需系统装 `tesseract` 可执行文件**，只装 Python 包会调用失败 |
+| 无 | — | — | 走降级路径：`text=""` / `confidence=0` / `engine="none"` + WARN |
+
+引擎探测规则：`paddle` 需要 `paddleocr` 与 `paddle` 同时可导入；`tesseract` 需要
+`pytesseract` 可导入**且** `tesseract` 在 `PATH` 里（只装 Python 包不算可用）。
+详见 `src/ocr_engine.py` 与 `docs/LICENSES.md` 的「可选依赖」小节。
+
+### 低置信度文本处理
+
+S6 会输出 `text` / `confidence` / `engine` / `is_placeholder` 四个字段；S8 只在
+**`confidence >= text.confidence_min` 且 `is_placeholder=false`** 时写 TEXT 实体。
+
+- **灰框（`debug/overlay_s8.png` 里的灰色虚线框）** = 被判为低置信度或占位的行，
+  只有掩膜、没有 TEXT 实体；数量记在 `metrics_s8.json` 的
+  `counts.text_skipped_low_confidence`。
+- **阈值位置**：`config.yaml` → `text.ocr.text_confidence_min`（默认 `0.6`）。
+- **排查方向**：① 行高是否 < `text.min_height_mm`（默认 1.5 mm，≈8 pt@300DPI）；
+  ② 原图该区域是否与图线粘连（被「结构性基元扣除」吃掉）；③ 引擎是否真的可用
+  （看 `metrics_s6.json` 的 `details.ocr_engine` 与 WARN）；④ 语言包是否覆盖
+  （`text.ocr.lang` 默认 `["ch","en"]`）。
+- **绝不编造**：置信度不足时宁可缺字，也不写猜测内容——缺字可人工补，错字会污染下游。
+
 ## 目录
 
 | 目录 | 内容 |
