@@ -38,13 +38,15 @@ qc:
   dpi_mode: degrade               # reject | warn | degrade | ignore（degrade=继续 + WARN + 预算按 true_dpi 放大）
   budget_reference_dpi: 300       # 误差预算基准（SPEC §1.2）；低 DPI 图实际 mm 预算 × (budget_reference_dpi/true_dpi)
   fallback_dpi: 300               # 元数据（EXIF/pHYs/TIFF）缺失时的兜底 DPI；SPEC §1.1 要求 WARN 后再用
-  sharpness_min: 0.25             # 边缘自相关估计的锐度指标；低于此说明「标称高分辨率实际模糊」
+  sharpness_min: 0.8              # ≈拦截 σ≥3 的模糊，保护 S2 边缘提取精度（实测：清晰 1.0–1.35、σ=2 → 0.63、σ=6 → 0.21）
   skew_max_deg: 3.0               # 页面倾斜超过此值自动旋转校正
   skew_search_deg: 5.0            # 倾斜搜索范围 ±（投影轮廓法）；超出此范围视为无主向
   skew_prominence_min: 8.0        # 投影峰显著性 = 峰值/中位数；低于此判"无可信主轴"（实测：网格 17–35、圆形零件 4.3、单线 1.9、截图 1.2）
   perspective_max_deviation: 0.02 # 四边检测的直线汇聚度；超限建议 projective 配准或拒绝
-  jpeg_ring_artifact_detect: true # 检测 JPEG 压缩环/块效应
-  moire_detect: true              # 频谱峰值检测半调网点/莫尔纹
+  jpeg_ring_artifact_detect: true # 检测 JPEG 压缩环/块效应（仅对 JPEG 输入生效）
+  jpeg_blockiness_max: 2.0        # 块边界/内部梯度比上限（启发式；实测干净图 1.0–1.2，强块效应 >2）
+  moire_detect: true              # 半调网点/莫尔纹检测（连通域点密度法）
+  moire_dot_density_max: 20.0     # 每 1e4 px² 的"小圆点"连通域数上限（实测：干净图 0–0.4，网点图 279–625）
   shadow_block_size_ratio: 16     # 分块光照不均检测的块尺寸 = 短边/此值
   shadow_var_threshold: 0.08      # 块均值方差超过此值 → 触发背景平坦化
   stain_area_min_mm2: 25          # 污渍/折痕掩膜的最小面积（mm²），小于视为正常图元

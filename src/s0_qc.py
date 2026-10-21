@@ -47,6 +47,7 @@ _MAX_ANALYSIS_SIDE = 1200    # 质检分析用下采样上限（px）
 _SKEW_COARSE_STEP_DEG = 0.10
 _SKEW_FINE_STEP_DEG = 0.02
 _SKEW_ANALYSIS_SIDE = 600    # 投影法分析用下采样上限（px）
+_MOIRE_MAX_SIDE = 4000       # 网点统计的原分辨率上限，超过则下采样并 WARN
 
 
 class QcError(ValueError):
@@ -98,6 +99,18 @@ class CheckNotEvaluated(_Block):
     reason: str
 
 
+class ArtifactInfo(_Block):
+    """伪影检测结果。`confidence` 说明这个数字有多可信，不许含糊。"""
+
+    name: Literal["jpeg_blockiness", "moire"]
+    evaluated: bool
+    value: float | None
+    threshold: float
+    triggered: bool
+    confidence: Literal["measured", "heuristic"]
+    note: str
+
+
 class QcReport(_Block):
     image_path: str
     image_sha256: str
@@ -108,10 +121,19 @@ class QcReport(_Block):
     sharpness: SharpnessInfo
     skew: SkewInfo
     lighting: LightingInfo
+    artifacts: tuple[ArtifactInfo, ...]
     dpi_below_min: bool
     budget_scale: float
     mm_per_px: float
     status: QcStatus
+    skew_correction_applied: bool = Field(
+        ...,
+        description=(
+            "本图是否**已经**做过倾斜校正。S0 只判定不修改像素，故恒为 False；"
+            "S1 执行校正后在 metrics_s1.json 里置 true。下游（尤其 S7）只认最后置 true 的那份产物，"
+            "避免重复校正。"
+        ),
+    )
     warnings: tuple[str, ...]
     not_evaluated: tuple[CheckNotEvaluated, ...]
 
@@ -171,6 +193,11 @@ def _exif_dpi(image: Image.Image) -> tuple[float, float] | None:
                 x, y = x * 2.54, y * 2.54
             return round(x, 1), round(y, 1)
     return result
+
+
+def exif_dpi(image: Image.Image) -> tuple[float, float] | None:
+    """公开入口：读图像分辨率元数据（EXIF / PNG pHYs / TIFF 标签），读不到返回 None。"""
+    return _exif_dpi(image)
 
 
 def _load_gray(path: Path) -> tuple[np.ndarray, Image.Image]:
@@ -278,20 +305,72 @@ def estimate_skew(
     return -best_angle, prominence
 
 
+def halftone_dot_density(
+    gray: np.ndarray, *, max_area: int = 40, max_side: int = 8
+) -> float:
+    """每 1e4 px² 的「小圆点」连通域数量 —— 半调网点/莫尔纹的结构特征。
+
+    网点图由成千上万个 1–9 px 的孤立小点组成，而线条图是少数大连通域。
+    实测（同一批图）：干净线条图 0–0.4，6 px 网点 279，4 px 网点 625 —— 分离度 >100 倍。
+
+    注意：必须在**原分辨率**上统计；下采样会把网点糊成一片，密度骤降到 0。
+    """
+    if gray.ndim != 2:
+        raise QcError(f"halftone_dot_density 需要灰度图，收到形状 {gray.shape}")
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    small = 0
+    for index in range(1, count):
+        width = int(stats[index, cv2.CC_STAT_WIDTH])
+        height = int(stats[index, cv2.CC_STAT_HEIGHT])
+        area = int(stats[index, cv2.CC_STAT_AREA])
+        long_side = max(width, height)
+        short_side = max(1, min(width, height))
+        if 1 <= area <= max_area and long_side <= max_side and long_side / short_side <= 3.0:
+            small += 1
+    return small * 10_000.0 / float(gray.size)
+
+
+def jpeg_blockiness(gray: np.ndarray, *, block: int = 8) -> float:
+    """8×8 块边界与块内部平均梯度之比（JPEG 块效应的启发式指标）。
+
+    干净图实测 1.0–1.2。**局限**：若图元恰好落在 8 px 网格上（程序生成的等距网格），
+    指标会假高（实测 6.5），因此只对**真实 JPEG 输入**启用，且在报告里标 `confidence=heuristic`。
+    """
+    if gray.ndim != 2:
+        raise QcError(f"jpeg_blockiness 需要灰度图，收到形状 {gray.shape}")
+    diff = np.abs(np.diff(gray.astype(np.float32), axis=1))
+    if diff.size == 0:
+        return 1.0
+    columns = np.arange(diff.shape[1])
+    boundary = (columns % block) == (block - 1)
+    if not boundary.any() or boundary.all():
+        return 1.0
+    edge = float(diff[:, boundary].mean())
+    inner = float(diff[:, ~boundary].mean())
+    return edge / max(inner, 1e-6)
+
+
 def lighting_blocks(gray: np.ndarray, *, block_ratio: float) -> tuple[float, int]:
-    """分块均值的变异系数 CV = std/mean。返回 (cv, block_size_px)。"""
+    """分块**中位数**的变异系数 CV = std/mean。返回 (cv, block_size_px)。
+
+    为什么用中位数而不是均值：块内只要压到一条线，均值就被拉低，CV 会变成"内容密度"
+    而不是"光照不均"。中位数对少数暗像素稳健（3px 线占 29×29 块不到 1%），
+    实测：平坦光照的线条图 CV 0.148（均值）→ 0.01 量级（中位数），而真实的梯度光照
+    仍然给出 >0.3。
+    """
     if block_ratio <= 0:
         raise QcError(f"block_ratio 必须 > 0，收到 {block_ratio}")
     h, w = gray.shape[:2]
     block = max(8, int(round(min(h, w) / block_ratio)))
-    img = gray.astype(np.float32)
-    means: list[float] = []
+    img = np.asarray(gray, dtype=np.float32)
+    values: list[float] = []
     for y0 in range(0, h - block + 1, block):
         for x0 in range(0, w - block + 1, block):
-            means.append(float(img[y0:y0 + block, x0:x0 + block].mean()))
-    if not means:
+            values.append(float(np.median(img[y0:y0 + block, x0:x0 + block])))
+    if not values:
         return 0.0, block
-    arr = np.asarray(means, dtype=np.float64)
+    arr = np.asarray(values, dtype=np.float64)
     mean = float(arr.mean())
     if mean <= 1e-6:
         return 0.0, block
@@ -417,23 +496,87 @@ def run_s0_qc(
         recommend_background_flatten=bool(uneven),
     )
 
-    # ---- 未实现的检测如实标注 ----
+    # ---- 伪影：JPEG 块效应（仅 JPEG 输入）+ 半调网点/莫尔纹 ----
+    artifacts: list[ArtifactInfo] = []
+
+    if qc.jpeg_ring_artifact_detect:
+        if image.format == "JPEG":
+            blockiness = jpeg_blockiness(small)
+            triggered = blockiness > qc.jpeg_blockiness_max
+            artifacts.append(
+                ArtifactInfo(
+                    name="jpeg_blockiness",
+                    evaluated=True,
+                    value=round(blockiness, 6),
+                    threshold=qc.jpeg_blockiness_max,
+                    triggered=bool(triggered),
+                    confidence="heuristic",
+                    note="8×8 块边界/内部梯度比；干净图 1.0–1.2，强块效应 >2",
+                )
+            )
+            if triggered:
+                warnings.append(
+                    f"JPEG 块效应 {blockiness:.2f} > jpeg_blockiness_max "
+                    f"{qc.jpeg_blockiness_max:g}：建议去块滤波（S1 会据此调整）"
+                )
+                status = "degraded" if status == "pass" else status
+        else:
+            artifacts.append(
+                ArtifactInfo(
+                    name="jpeg_blockiness",
+                    evaluated=False,
+                    value=None,
+                    threshold=qc.jpeg_blockiness_max,
+                    triggered=False,
+                    confidence="heuristic",
+                    note=f"输入不是 JPEG（format={image.format}），该检测不适用",
+                )
+            )
+
+    if qc.moire_detect:
+        # 网点统计必须在原分辨率上做（下采样会把点糊成一片）
+        dot_source = gray
+        if max(gray.shape[:2]) > _MOIRE_MAX_SIDE:
+            factor = _MOIRE_MAX_SIDE / float(max(gray.shape[:2]))
+            dot_source = cv2.resize(
+                gray,
+                (max(1, int(round(gray.shape[1] * factor))),
+                 max(1, int(round(gray.shape[0] * factor)))),
+                interpolation=cv2.INTER_AREA,
+            )
+            warnings.append(
+                f"莫尔纹检测在下采样图（长边 {_MOIRE_MAX_SIDE}px）上进行：极小网点可能漏检"
+            )
+        density = halftone_dot_density(dot_source)
+        triggered = density > qc.moire_dot_density_max
+        artifacts.append(
+            ArtifactInfo(
+                name="moire",
+                evaluated=True,
+                value=round(density, 6),
+                threshold=qc.moire_dot_density_max,
+                triggered=bool(triggered),
+                confidence="measured",
+                note="小圆点连通域密度（每 1e4 px²）；干净图 0–0.4，网点图 279–625",
+            )
+        )
+        if triggered:
+            warnings.append(
+                f"疑似半调网点/莫尔纹：点密度 {density:.1f}/1e4px > "
+                f"moire_dot_density_max {qc.moire_dot_density_max:g}："
+                "S1 需去网滤波，否则 S2 骨架会被网点污染"
+            )
+            status = "degraded" if status == "pass" else status
+
+    # ---- 仍未实现的检测如实标注（不假装通过）----
     not_evaluated = (
         CheckNotEvaluated(
-            name="jpeg_ring_artifact",
-            reason="S0 未实现：M1 只交付 DPI/锐度/倾斜/光照四项；该检测排在 S2 前补齐",
-        ),
-        CheckNotEvaluated(
-            name="moire",
-            reason="S0 未实现：需要频谱峰值检测，排在 S2 前补齐",
-        ),
-        CheckNotEvaluated(
             name="perspective",
-            reason="S0 未实现：需要四边检测 + 汇聚度估计，排在 S7 配准前补齐",
+            reason="S0 未实现：需要四边检测 + 汇聚度估计，排在 S7 配准前补齐（用户决策 #3）",
         ),
         CheckNotEvaluated(
             name="stain_mask",
-            reason="S0 未实现：需要大面积非图斑分割，排在 S3 前补齐",
+            reason="S0 未实现：需要大面积非图斑分割，优先级最低，排在 S3 之后",
         ),
     )
 
@@ -459,10 +602,12 @@ def run_s0_qc(
         ),
         skew=skew,
         lighting=lighting,
+        artifacts=tuple(artifacts),
         dpi_below_min=bool(below_min),
         budget_scale=round(float(budget), 6),
         mm_per_px=round(mm_per_px(applied_dpi), 9),
         status=status,
+        skew_correction_applied=False,  # S0 只判定，不修改像素
         warnings=tuple(warnings),
         not_evaluated=not_evaluated,
     )
@@ -476,6 +621,7 @@ def run_s0_qc(
             "analysis_side_px": int(max(small.shape[:2])),
             "lighting_blocks": int((small.shape[0] // block) * (small.shape[1] // block)),
             "warnings": len(warnings),
+            "artifacts_triggered": sum(1 for a in artifacts if a.triggered),
         },
         timing_ms=0.0,
         error_estimate={
@@ -490,6 +636,12 @@ def run_s0_qc(
             "image_sha256": report.image_sha256,
             "skew_confident": report.skew.confident,
             "skew_prominence": report.skew.prominence,
+            "skew_correction_applied": report.skew_correction_applied,
+            "artifacts": [
+                {"name": a.name, "value": a.value, "triggered": a.triggered,
+                 "confidence": a.confidence}
+                for a in artifacts
+            ],
             "not_evaluated": [c.name for c in report.not_evaluated],
         },
     )
@@ -521,6 +673,7 @@ def run_s0_qc_timed(
 
 
 __all__ = [
+    "ArtifactInfo",
     "CheckNotEvaluated",
     "DpiInfo",
     "LightingInfo",
@@ -529,6 +682,9 @@ __all__ = [
     "SharpnessInfo",
     "SkewInfo",
     "estimate_skew",
+    "exif_dpi",
+    "halftone_dot_density",
+    "jpeg_blockiness",
     "lighting_blocks",
     "run_s0_qc",
     "run_s0_qc_timed",

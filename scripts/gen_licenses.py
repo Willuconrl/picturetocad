@@ -112,8 +112,59 @@ def _source_url(md: importlib_metadata.PackageMetadata, name: str) -> str:
     return f"https://pypi.org/project/{name}/"
 
 
+#: 从 LICENSE 文件正文判定的特征文本（先判长文本，避免被短特征截胡）
+LICENSE_TEXT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Apache-2.0", ("apache license", "version 2.0")),
+    ("MPL-2.0", ("mozilla public license version 2.0",)),
+    ("PSF-2.0", ("python software foundation license",)),
+    ("ISC", ("permission to use, copy, modify, and/or distribute this software",)),
+    ("BSD-3-Clause", ("redistribution and use in source and binary forms", "neither the name")),
+    ("BSD-2-Clause", ("redistribution and use in source and binary forms",)),
+    ("MIT", ("permission is hereby granted, free of charge",)),
+)
+
+#: 包内许可证文件名（大小写不敏感前缀）
+LICENSE_FILE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE")
+
+
+def _license_text_files(name: str) -> list[Path]:
+    """列出已安装包内的许可证文件（dist-info 与包目录都找）。"""
+    try:
+        dist = importlib_metadata.distribution(name)
+    except importlib_metadata.PackageNotFoundError:
+        return []
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for item in dist.files or []:
+        upper = item.name.upper()
+        if not upper.startswith(LICENSE_FILE_PREFIXES):
+            continue
+        path = Path(dist.locate_file(item))
+        if path.is_file() and path not in seen and path.stat().st_size <= 1 << 20:
+            seen.add(path)
+            found.append(path)
+    return found
+
+
+def _spdx_from_license_file(name: str) -> tuple[str, str] | None:
+    """读包内 LICENSE 正文推断 SPDX。成功返回 (spdx, 证据)，失败返回 None。"""
+    for path in _license_text_files(name):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+        for spdx, needles in LICENSE_TEXT_PATTERNS:
+            if all(needle in text for needle in needles):
+                return spdx, f"source=LICENSE_file_inference ({path.name})"
+    return None
+
+
 def _spdx(md: importlib_metadata.PackageMetadata, name: str) -> tuple[str, str]:
-    """返回 (SPDX 或 UNKNOWN, 证据说明)。"""
+    """返回 (SPDX 或 UNKNOWN, 证据说明)。
+
+    判定顺序：License-Expression → 语义唯一的分类器 → License 字段 → 包内 LICENSE 正文。
+    前四步都失败才落 UNKNOWN，并在「待人工确认」里列出。
+    """
     expression = md.get("License-Expression")
     if expression:
         return str(expression).strip(), "metadata: License-Expression"
@@ -133,8 +184,12 @@ def _spdx(md: importlib_metadata.PackageMetadata, name: str) -> tuple[str, str]:
     if len(hits) == 1:
         return hits[0], "metadata: License（含唯一 SPDX 标识）"
 
+    from_file = _spdx_from_license_file(name)
+    if from_file is not None:
+        return from_file
+
     reason = "metadata 缺失" if not raw_license and not classifiers else (
-        f"无 License-Expression，分类器不可判定（{classifiers[:2] or '无'}）"
+        f"无 License-Expression，分类器不可判定（{classifiers[:2] or '无'}），且包内无 LICENSE 文件"
     )
     return "UNKNOWN", reason
 

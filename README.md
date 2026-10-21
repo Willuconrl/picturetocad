@@ -62,7 +62,18 @@ r2v --list-presets                            # 列出四套预设
   坐标变换、`src/artifacts.py` 产物契约、`r2v` CLI 骨架、DXF 比特级可复现（`src/dxf_repro.py`）。
 - **M1 完成**：`src/s0_qc.py`（DPI/锐度/倾斜/光照 + `qc_report.json` + degrade 预算放大）、
   可安装包与控制台入口 `r2v`、`docs/LICENSES.md`。
-- 后续：S1 预处理 → S2 二值化+亚像素 → … → S8 组装（见 `specs/SPEC.md` §4）。
+- **M2 完成**：`src/s1_preprocess.py`（BT.709 灰度/黑边裁切/反白/背景平坦化/去噪/超采样 +
+  `metrics_s1.json`）；S0 补充 JPEG 块效应与半调网点检测、`skew_correction_applied` 字段；
+  锐度阈值收紧到 0.8；许可证改为「metadata → 包内 LICENSE 文件」两级判定。
+- 后续：S2 二值化 + 亚像素边缘 → S3 骨架拓扑 → … → S8 组装（见 `specs/SPEC.md` §4）。
+
+## 已知限制
+
+- **JPEG 块效应**检测是启发式（块边界/内部梯度比），只在 JPEG 输入上运行；指标值会写进
+  `qc_report.json` 且标 `confidence=heuristic`，阈值 2.0 只拦强块效应。
+- **莫尔纹**用「小圆点连通域密度」判定（干净线条图 0–0.4 / 1e4px²，6px 网点图 279），
+  对极细网点（<2px）可能漏检。
+- S0 的 `perspective` 与 `stain_mask` 仍未实现，报告里以 `not_evaluated` 明示。
 
 ## TODO
 

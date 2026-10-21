@@ -299,7 +299,9 @@ class QcConfig(_Section):
     skew_prominence_min: float = Field(..., gt=0, description="投影峰显著性下限，低于则判不可信")
     perspective_max_deviation: float = Field(..., ge=0)
     jpeg_ring_artifact_detect: bool
+    jpeg_blockiness_max: float = Field(..., gt=1.0, description="块边界/内部梯度比上限（仅 JPEG 输入）")
     moire_detect: bool
+    moire_dot_density_max: float = Field(..., gt=0, description="每 1e4 px² 的小圆点连通域数上限")
     shadow_block_size_ratio: float = Field(..., gt=0)
     shadow_var_threshold: float = Field(..., ge=0)
     stain_area_min_mm2: float = Field(..., gt=0)

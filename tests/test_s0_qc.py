@@ -23,6 +23,8 @@ from src.config import QcConfig, load_config
 from src.s0_qc import (
     QcError,
     estimate_skew,
+    halftone_dot_density,
+    jpeg_blockiness,
     lighting_blocks,
     run_s0_qc,
     run_s0_qc_timed,
@@ -75,10 +77,11 @@ def test_screenshot_report_has_full_qc_fields(qc: QcConfig) -> None:
     payload = report.to_json()
     for key in (
         "image_path", "image_sha256", "width_px", "height_px", "dpi", "sharpness",
-        "skew", "lighting", "budget_scale", "mm_per_px", "status", "warnings",
-        "not_evaluated",
+        "skew", "lighting", "artifacts", "budget_scale", "mm_per_px", "status",
+        "skew_correction_applied", "warnings", "not_evaluated",
     ):
         assert key in payload, f"qc_report 缺少 {key}"
+    assert payload["skew_correction_applied"] is False, "S0 只判定，不得声称已校正"
     assert (report.width_px, report.height_px) == (736, 625)
     assert len(report.image_sha256) == 64
 
@@ -164,7 +167,7 @@ def test_estimate_skew_rejects_bad_search_range() -> None:
 # 验收 3：锐度阶梯
 # ---------------------------------------------------------------------------
 def test_sharpness_ladder_matches_threshold(qc: QcConfig, tmp_path: Path) -> None:
-    """清晰图必须通过；重度模糊（σ=6）必须不通过；中间值随 σ 单调下降。"""
+    """阈值 0.8 的语义：清晰通过；σ=2 起的模糊不通过（保护 S2 边缘提取）；单调下降。"""
     base = _line_image()
     values: list[float] = []
     for sigma in (0.0, 2.0, 4.0, 6.0):
@@ -175,8 +178,8 @@ def test_sharpness_ladder_matches_threshold(qc: QcConfig, tmp_path: Path) -> Non
         if sigma == 0.0:
             assert report.sharpness.passed is True
             assert report.sharpness.value > qc.sharpness_min
-        if sigma == 6.0:
-            assert report.sharpness.passed is False, report.sharpness
+        if sigma >= 2.0:
+            assert report.sharpness.passed is False, (sigma, report.sharpness)
             assert report.sharpness.value < qc.sharpness_min
     assert values == sorted(values, reverse=True), f"锐度未随模糊单调下降：{values}"
 
@@ -284,5 +287,69 @@ def test_corrupt_image_raises(tmp_path: Path, qc: QcConfig) -> None:
 def test_not_evaluated_checks_are_declared(qc: QcConfig) -> None:
     report, _ = run_s0_qc(SCREENSHOT, qc)
     names = {c.name for c in report.not_evaluated}
-    assert names == {"jpeg_ring_artifact", "moire", "perspective", "stain_mask"}
+    assert names == {"perspective", "stain_mask"}
     assert all(c.reason for c in report.not_evaluated)
+
+
+# ---------------------------------------------------------------------------
+# 伪影：JPEG 块效应（仅 JPEG 输入）与半调网点/莫尔纹
+# ---------------------------------------------------------------------------
+def _halftone(pitch: int = 6, *, width: int = 400, height: int = 300) -> np.ndarray:
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    dots = (np.sin(2 * np.pi * xx / pitch) > 0) & (np.sin(2 * np.pi * yy / pitch) > 0)
+    return (255 - dots.astype(np.uint8) * 255)
+
+
+def test_moire_detected_on_halftone(qc: QcConfig, tmp_path: Path) -> None:
+    path = _save_png(tmp_path / "halftone.png", _halftone(6), (300.0, 300.0))
+    report, _ = run_s0_qc(path, qc)
+    artifact = next(a for a in report.artifacts if a.name == "moire")
+    assert artifact.evaluated is True
+    assert artifact.value is not None and artifact.value > qc.moire_dot_density_max
+    assert artifact.triggered is True
+    assert artifact.confidence == "measured"
+    assert report.status == "degraded"
+    assert any("网点" in w for w in report.warnings)
+
+
+def test_moire_not_triggered_on_clean_lines(qc: QcConfig, tmp_path: Path) -> None:
+    path = _save_png(tmp_path / "clean.png", _grid(), (300.0, 300.0))
+    report, _ = run_s0_qc(path, qc)
+    artifact = next(a for a in report.artifacts if a.name == "moire")
+    assert artifact.triggered is False
+    assert artifact.value is not None and artifact.value < qc.moire_dot_density_max
+
+
+def test_jpeg_blockiness_skipped_for_png(qc: QcConfig, tmp_path: Path) -> None:
+    path = _save_png(tmp_path / "clean.png", _grid(), (300.0, 300.0))
+    report, _ = run_s0_qc(path, qc)
+    artifact = next(a for a in report.artifacts if a.name == "jpeg_blockiness")
+    assert artifact.evaluated is False
+    assert artifact.value is None
+    assert "不是 JPEG" in artifact.note
+
+
+def test_jpeg_blockiness_evaluated_for_jpeg(qc: QcConfig) -> None:
+    assert SCREENSHOT.suffix.upper() == ".JPG"
+    report, _ = run_s0_qc(SCREENSHOT, qc)
+    artifact = next(a for a in report.artifacts if a.name == "jpeg_blockiness")
+    assert artifact.evaluated is True
+    assert artifact.confidence == "heuristic"
+    assert artifact.value is not None and artifact.value > 0.0
+
+
+def test_artifact_detection_can_be_disabled(qc: QcConfig, tmp_path: Path) -> None:
+    disabled = qc.model_copy(update={"moire_detect": False, "jpeg_ring_artifact_detect": False})
+    path = _save_png(tmp_path / "halftone.png", _halftone(4), (300.0, 300.0))
+    report, _ = run_s0_qc(path, disabled)
+    assert report.artifacts == ()
+
+
+def test_halftone_dot_density_rejects_colour_input() -> None:
+    with pytest.raises(QcError, match="灰度图"):
+        halftone_dot_density(np.zeros((8, 8, 3), np.uint8))
+
+
+def test_jpeg_blockiness_rejects_colour_input() -> None:
+    with pytest.raises(QcError, match="灰度图"):
+        jpeg_blockiness(np.zeros((8, 8, 3), np.uint8))

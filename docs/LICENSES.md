@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | numpy | 2.5.4 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org | metadata: License-Expression；requirements 分支锁定 2.2.6/2.5.4，本表按实装 2.5.4 记录 |
 | scipy | 1.18.1 | BSD-3-Clause | https://scipy.org/ | metadata: License（含唯一 SPDX 标识）；requirements 分支锁定 1.15.3/1.18.1，本表按实装 1.18.1 记录 |
-| scikit-image | 0.26.0 | UNKNOWN | https://scikit-image.org | 无 License-Expression，分类器不可判定（['Development Status :: 4 - Beta', 'Environment :: Console']）；requirements 分支锁定 0.25.2/0.26.0，本表按实装 0.26.0 记录 |
+| scikit-image | 0.26.0 | BSD-3-Clause | https://scikit-image.org | source=LICENSE_file_inference (LICENSE.txt)；requirements 分支锁定 0.25.2/0.26.0，本表按实装 0.26.0 记录 |
 | opencv-python-headless | 5.0.0.93 | Apache-2.0 | https://github.com/opencv/opencv-python | classifier: License :: OSI Approved :: Apache Software License |
 | ezdxf | 1.4.4 | MIT | https://github.com/mozman/ezdxf | classifier: License :: OSI Approved :: MIT License |
 | fonttools | 4.65.0 | MIT | http://github.com/fonttools/fonttools | metadata: License |
@@ -28,4 +28,4 @@
 
 ## 待人工确认
 
-- [ ] `scikit-image==0.26.0`：SPDX 未知（无 License-Expression，分类器不可判定（['Development Status :: 4 - Beta', 'Environment :: Console']）；requirements 分支锁定 0.25.2/0.26.0，本表按实装 0.26.0 记录），请人工核对 https://scikit-image.org 后补全
+- 无（全部依赖都有可判定的 SPDX 标识）。
