@@ -451,6 +451,48 @@ def _residuals(model: LineModel | CircleModel, points: np.ndarray) -> np.ndarray
     return np.abs(np.hypot(points[:, 0] - model.center[0], points[:, 1] - model.center[1]) - model.radius)
 
 
+def _direction_of(points: np.ndarray, *, at_end: bool) -> tuple[float, float]:
+    if len(points) < 2:
+        return (1.0, 0.0)
+    dx, dy = (points[-1] - points[-2]) if at_end else (points[1] - points[0])
+    norm = math.hypot(dx, dy)
+    return (dx / norm, dy / norm) if norm > 1e-12 else (1.0, 0.0)
+
+
+def _merge_same_kind(
+    segments: list[_Segment],
+    *,
+    angle_tol_deg: float = 5.0,
+    rms_factor: float = 1.5,
+) -> list[_Segment]:
+    """把"同模型 + 相邻夹角小"的子段合并回单段，防止一条长边被切碎。
+
+    实测 polyline_bulge 的一条直线被切成 3 条 LINE（每个子段残差都在容差内，
+    但分段器仍按最大残差点反复切开）。安全约束（用户确认）：合并后 RMS 不得
+    超过原子段最大 RMS 的 1.5 倍，避免把真实折角强行拉直。
+    """
+    if len(segments) < 2:
+        return segments
+    kinds = {segment.kind for segment in segments}
+    if len(kinds) != 1:
+        return segments
+    for left, right in zip(segments, segments[1:]):
+        d1 = _direction_of(left.points, at_end=True)
+        d2 = _direction_of(right.points, at_end=False)
+        cosine = max(-1.0, min(1.0, d1[0] * d2[0] + d1[1] * d2[1]))
+        if math.degrees(math.acos(cosine)) > angle_tol_deg:
+            return segments
+    merged_points = np.vstack([segments[0].points] + [s.points[1:] for s in segments[1:]])
+    kind = segments[0].kind
+    model = fit_circle(merged_points) if kind == "circle" else fit_line(merged_points)
+    if model is None:
+        return segments
+    worst = max(segment.model.rms for segment in segments)
+    if model.rms > rms_factor * max(worst, 1e-6):
+        return segments
+    return [_Segment(points=merged_points, model=model, kind=kind)]
+
+
 def split_and_fit(
     points: np.ndarray,
     *,
@@ -682,6 +724,7 @@ def run_s4_fit(
             arc_tolerance_px=max(tolerance_px, 0.5 * arc_residual_px),
         )
         warnings.extend(segment_warnings)
+        segments = _merge_same_kind(segments)
         if not segments:
             # 分段失败/超上限 → 整条边降级为多段线（不丢几何）。
             # 只有 2 个点时写成 LINE：2 点 LWPOLYLINE 是退化实体，golden 也不认。
