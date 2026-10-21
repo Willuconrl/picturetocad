@@ -1,24 +1,27 @@
 # src/s4_segment.py
-"""S4 分段器：双模型联合切分（LINE / ARC × 切点枚举 × BIC）。
+"""S4 切分预言机（Split-Only Oracle）：**只决定在哪里切、每段是什么模型**。
 
-为什么需要它
-------------
-单模型拟合 + "残差超阈值就切"的策略在「圆弧 + 直线」拼接处必然失效：整段用圆弧拟合时，
-直线段的残差会被弧段的曲率拉偏；整段用直线拟合时，弧段又永远超阈值。切点也因此
-被错误地定在高曲率区内部（M7 的两次尝试都栽在这里）。
+设计变化（M8-4 Phase 4）
+------------------------
+Phase 3 的 `segment_curve` 直接返回拟合好的 `_Segment`，绕过了 `run_s4_fit` 里
+一整套后处理（`select_model` 竞争、`_refit_circle`、`_line_extent`、节点吸附、
+`_enforce_g1`），导致 8 个既有用例失败。本模块因此**降级为只输出切点与模型类型**：
 
-本模块把切点选择变成**组合优化**：
+    plan_segmentation(points, tolerance_px) -> Plan(split_indices=[220], model_types=["LINE", "ARC"])
 
-    SSE(k)  = SSE(M1, P[:k]) + SSE(M2, P[k:])
-    Cost(k) = SSE(k) + λ·ln(n)·p(M1,M2)        # p(LINE)=2, p(ARC)=3
+拟合、端点延伸、节点吸附、G1 复检全部仍由 `run_s4_fit` 原有代码完成。
+
+决策逻辑
+--------
+1. **单模型拦截（奥卡姆剃刀）**：整段能用一个 LINE（或一个 ARC）拟合到容差内，
+   就直接返回空切点列表——避免把完美圆弧切成"短直线 + 弧"。
+2. 否则用**双模型联合 SSE + BIC** 枚举切点，必要时递归细分。
 
 性能（红线 10 ms/边）
---------------------
-- 直线 SSE 用**积分图**（前缀和）O(1) 求解：过质心的 TLS 直线，其残差平方和
-  恰等于散布矩阵的最小特征值；
-- 圆弧在扫描阶段用 Kåsa 代数解、仅最终胜者做 LM 精化；
-- 粗到细两级搜索（粗步长 `COARSE_STEP`，再在最优附近 ±`COARSE_STEP` 精搜）；
-- 实测 `synthetic_polyline_bulge`（493 点、505 px 长边）**4.9 ms**。
+---------------------
+- 直线 SSE 走**积分图**（前缀和）O(1)：过质心的 TLS 残差平方和 = 散布矩阵最小特征值；
+- 圆弧扫描用 Kåsa 代数解、隔点采样；
+- 粗到细两级搜索（粗步长 `COARSE_STEP=10`）。
 """
 
 from __future__ import annotations
@@ -33,13 +36,27 @@ import src.s4_fit as s4
 
 #: 每侧最少点数
 MIN_POINTS = 10
-#: 粗搜索步长（不得大于 10：切点分辨率 = 步长）
+#: 粗搜索步长（用户约束：不得大于 10）
 COARSE_STEP = 10
 #: BIC 惩罚系数
 DEFAULT_LAMBDA = 1.0
 #: 参与竞争的模型对。排除 `arc+arc`：工程图上同径双弧极罕见，而它每个候选点
-#: 要多做 2 次圆拟合（占扫描耗时 ~40%）；遇到 S 形曲线再单独开。
+#: 要多做 2 次圆拟合（占扫描 ~40%）；遇到 S 形曲线再单独开。
 MODEL_PAIRS: tuple[tuple[str, str], ...] = (("line", "line"), ("line", "arc"), ("arc", "line"))
+#: 递归细分上限
+MAX_DEPTH = 6
+
+
+@dataclass(frozen=True)
+class Plan:
+    """切分计划：`split_indices[i]` 是第 i+1 段的起点（相对 points 的下标）。"""
+
+    split_indices: tuple[int, ...]
+    model_types: tuple[str, ...]  # "LINE" / "ARC"，长度 = len(split_indices) + 1
+
+    @property
+    def segment_count(self) -> int:
+        return len(self.model_types)
 
 
 class PrefixLineSSE:
@@ -78,16 +95,16 @@ class PrefixLineSSE:
         return float(max(half - disc, 0.0))
 
 
-def _arc_sse(points: np.ndarray) -> tuple[object | None, float]:
+def _arc_sse(points: np.ndarray) -> float:
     """圆弧的代数拟合 SSE（扫描用 Kåsa，点数不足时返回 inf）。"""
     if len(points) < s4._MIN_CIRCLE_POINTS:  # noqa: SLF001
-        return None, float("inf")
+        return float("inf")
     sample = points[::2] if len(points) >= 2 * s4._MIN_CIRCLE_POINTS else points  # noqa: SLF001
     model = s4._circle_kasa(sample)  # noqa: SLF001
     if model is None:
-        return None, float("inf")
+        return float("inf")
     residuals = np.hypot(points[:, 0] - model.center[0], points[:, 1] - model.center[1]) - model.radius
-    return model, float(np.sum(residuals**2))
+    return float(np.sum(residuals**2))
 
 
 @dataclass(frozen=True)
@@ -104,7 +121,7 @@ class SplitResult:
 def best_split(
     points: np.ndarray, *, lam: float = DEFAULT_LAMBDA, tolerance_px: float | None = None
 ) -> SplitResult | None:
-    """粗到细枚举切点 × 模型对，返回最优解。"""
+    """粗到细枚举切点 × 模型对，返回最优解（只用于决策，不产出拟合对象）。"""
     n = len(points)
     if n < 2 * MIN_POINTS:
         return None
@@ -113,15 +130,13 @@ def best_split(
     def scan(candidates: Sequence[int]) -> tuple[float, int, tuple[str, str], float, float, float] | None:
         best = None
         for k in candidates:
-            left_points = points[:k]
-            right_points = points[k:]
             for pair in MODEL_PAIRS:
-                sse_left = prefix.sse(0, k) if pair[0] == "line" else _arc_sse(left_points)[1]
-                sse_right = prefix.sse(k, n) if pair[1] == "line" else _arc_sse(right_points)[1]
+                sse_left = prefix.sse(0, k) if pair[0] == "line" else _arc_sse(points[:k])
+                sse_right = prefix.sse(k, n) if pair[1] == "line" else _arc_sse(points[k:])
                 if not math.isfinite(sse_left) or not math.isfinite(sse_right):
                     continue
-                params = 2 * (pair[0] == "line") + 3 * (pair[0] == "arc") \
-                    + 2 * (pair[1] == "line") + 3 * (pair[1] == "arc")
+                params = 6 - len(pair)  # 3 参数 + 3 参数；line 记 2
+                params = sum(3 if kind == "arc" else 2 for kind in pair)
                 sse = sse_left + sse_right
                 cost = sse + lam * math.log(max(n, 2)) * params
                 if best is None or cost < best[0]:
@@ -141,100 +156,70 @@ def best_split(
     )
 
 
-def _make_segment(points: np.ndarray, kind: str) -> object | None:
-    """最终拟合：直线用 TLS（O(n)，只做一次）、圆弧用 Kåsa + LM 精化。"""
-    if kind == "line":
-        model = s4.fit_line(points)
-        if model is None:
-            return None
-        residuals = (points - np.asarray(model.point)) @ np.asarray(model.normal)
-        rms = float(np.sqrt(np.mean(residuals**2)))
-        return s4._Segment(points=points, model=model, kind="line") if rms <= 1e9 else None  # noqa: SLF001
-    model = s4.fit_circle(points)
-    if model is None:
+def _single_model_kind(points: np.ndarray, *, tolerance_px: float) -> str | None:
+    """整段能否单模型拟合到容差内？返回 "LINE"/"ARC"/None。"""
+    if len(points) < 2:
         return None
-    return s4._Segment(points=points, model=model, kind="circle")  # noqa: SLF001
-
-
-def _rms_of(kind: str, model: object, points: np.ndarray) -> float:
-    if kind == "line":
-        residuals = (points - np.asarray(model.point)) @ np.asarray(model.normal)  # type: ignore[attr-defined]
-        return float(np.sqrt(np.mean(residuals**2)))
-    residuals = np.hypot(
-        points[:, 0] - model.center[0], points[:, 1] - model.center[1]  # type: ignore[attr-defined]
-    ) - model.radius  # type: ignore[attr-defined]
-    return float(np.sqrt(np.mean(residuals**2)))
-
-
-def single_model_guard(
-    points: np.ndarray, *, tolerance_px: float
-) -> tuple[str, object] | None:
-    """奥卡姆剃刀：**先试单模型**，达标就不再切分。
-
-    纯圆弧/纯直线若直接进双模型枚举，会因数值微扰让 `line+arc` 的 Cost 略低于
-    `single arc`，把一条完整圆弧切成"短直线 + 弧"（M8-4 集成时正是这样破坏了
-    `test_arc_radius_and_center` 与端点逐位相等）。单模型达标即返回，100% 杜绝误切。
-    """
-    if len(points) >= 2:
-        line = s4.fit_line(points)
-        if line is not None and _rms_of("line", line, points) <= tolerance_px:
-            return "line", line
+    line = s4.fit_line(points)
+    if line is not None and line.rms <= tolerance_px:
+        return "LINE"
     if len(points) >= s4._MIN_CIRCLE_POINTS:  # noqa: SLF001
         circle = s4.fit_circle(points)
-        if circle is not None and _rms_of("circle", circle, points) <= tolerance_px:
-            return "circle", circle
+        if circle is not None and float(circle.rms) <= tolerance_px:
+            return "ARC"
     return None
 
 
-def segment_curve(
-    points: np.ndarray,
-    *,
-    tolerance_px: float,
-    max_segments: int = 64,
-    lam: float = DEFAULT_LAMBDA,
-    depth: int = 0,
-) -> list[object]:
-    """把一段中心线切成若干 LINE/ARC 基元。
-
-    流程：**单模型拦截** → 双模型联合切分 → 递归（某侧仍超容差继续切）。
-    `tolerance_px` 是**绝对**残差容差（由 `fitting.arc_residual_mm` 按 DPI 换算），
-    与线宽解耦。
-    """
-    if depth > 6 or len(points) < 2 * MIN_POINTS:
-        return []
-    guard = single_model_guard(points, tolerance_px=tolerance_px)
+def _split_recursive(
+    points: np.ndarray, *, tolerance_px: float, lam: float, depth: int
+) -> Plan | None:
+    guard = _single_model_kind(points, tolerance_px=tolerance_px)
     if guard is not None:
-        kind, model = guard
-        return [s4._Segment(points=points, model=model, kind=kind)]  # noqa: SLF001
+        return Plan(split_indices=(), model_types=(guard,))
+    if depth >= MAX_DEPTH:
+        return None
     split = best_split(points, lam=lam, tolerance_px=tolerance_px)
     if split is None:
-        return []
-    # 端点吸附：相邻两段共享**同一个浮点坐标**（points[k]），保证 bitwise equal
-    left = points[: split.index].copy()
-    left[-1] = points[split.index]
-    right = points[split.index:].copy()
-    left_rms = math.sqrt(split.sse_left / max(len(left), 1))
-    right_rms = math.sqrt(split.sse_right / max(len(right), 1))
-    segments: list[object] = []
-    for side, kind, rms in ((left, split.kinds[0], left_rms), (right, split.kinds[1], right_rms)):
-        if rms <= tolerance_px:
-            segment = _make_segment(side, kind)
-            if segment is not None:
-                segments.append(segment)
-                continue
-        deeper = segment_curve(
-            np.asarray(side), tolerance_px=tolerance_px, max_segments=max_segments,
-            lam=lam, depth=depth + 1,
-        )
-        if not deeper:
-            segment = _make_segment(side, kind)
-            if segment is not None:
-                segments.append(segment)
-        else:
-            segments.extend(deeper)
-    if len(segments) > max_segments:
-        return []
-    return segments
+        return None
+    left_plan = _split_recursive(
+        points[: split.index], tolerance_px=tolerance_px, lam=lam, depth=depth + 1
+    )
+    right_plan = _split_recursive(
+        points[split.index:], tolerance_px=tolerance_px, lam=lam, depth=depth + 1
+    )
+    if left_plan is None or right_plan is None:
+        return None
+    # 左段的切点原样保留；右段的切点整体平移 split.index
+    indices = tuple(left_plan.split_indices) + (split.index,) + tuple(
+        split.index + index for index in right_plan.split_indices
+    )
+    types = tuple(left_plan.model_types) + tuple(right_plan.model_types)
+    return Plan(split_indices=indices, model_types=types)
+
+
+def plan_segmentation(
+    points: np.ndarray, *, tolerance_px: float, lam: float = DEFAULT_LAMBDA
+) -> Plan:
+    """返回切分计划。退化情况（点数不足/求解失败）返回"整段单模型"的兜底计划。"""
+    if len(points) < 2 * MIN_POINTS:
+        guard = _single_model_kind(points, tolerance_px=tolerance_px)
+        return Plan(split_indices=(), model_types=(guard or "LINE",))
+    plan = _split_recursive(np.asarray(points), tolerance_px=tolerance_px, lam=lam, depth=0)
+    if plan is None:
+        return Plan(split_indices=(), model_types=("LINE",))
+    # 去掉过短段（< MIN_POINTS）造成的合并：确保相邻切点间距足够
+    cleaned: list[int] = []
+    for index in plan.split_indices:
+        if MIN_POINTS <= index <= len(points) - MIN_POINTS and (
+            not cleaned or index - cleaned[-1] >= MIN_POINTS
+        ):
+            cleaned.append(int(index))
+    if len(cleaned) + 1 != len(plan.model_types):
+        types = list(plan.model_types[: len(cleaned) + 1])
+        while len(types) < len(cleaned) + 1:
+            types.append(types[-1])
+        return Plan(split_indices=tuple(cleaned), model_types=tuple(types))
+    return Plan(split_indices=tuple(cleaned), model_types=tuple(plan.model_types))
 
 
 __all__ = [
@@ -242,9 +227,9 @@ __all__ = [
     "DEFAULT_LAMBDA",
     "MIN_POINTS",
     "MODEL_PAIRS",
+    "Plan",
     "PrefixLineSSE",
     "SplitResult",
     "best_split",
-    "segment_curve",
-    "single_model_guard",
+    "plan_segmentation",
 ]

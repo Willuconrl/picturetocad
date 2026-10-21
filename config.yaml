@@ -157,8 +157,9 @@ skeleton:
 fitting:
   tolerance_mm: 0.085                  # 主参数：拟合容差 ≈1px@300DPI
   dp_epsilon_px: null                  # 未设则由 tolerance_mm 与 DPI 反算，别手写
-  arc_residual_factor: 1.5             # 圆弧残差上限 = ×本地线宽
-  arc_residual_px: null                # 永远由上行 × 线宽派生
+  arc_residual_mm: 0.15                # 圆弧/分段残差上限（绝对毫米，M8-4）；300DPI 下 ≈1.77px
+  arc_residual_factor: null            # [DEPRECATED] 旧口径“×本地线宽”，已废弃；设值会触发 DeprecationWarning
+  arc_residual_px: null                # [DEPRECATED] 由 arc_residual_mm 按 DPI 换算
   prefer_arcs: false                   # base 面向工程图；机械图 preset 置 true
   model_select_alpha: 0.05             # 模型竞争（直线2参数 vs 圆3参数）的 F 检验显著性水平；BIC 作并列裁决
   full_circle_min_coverage_deg: 330    # 覆盖角 ≥330° 且闭合度达标 → CIRCLE 实体

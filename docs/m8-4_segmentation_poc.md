@@ -145,3 +145,40 @@ Cost(k) = SSE(k) + λ · ln(n) · p(M1,M2)        # p(LINE)=2, p(ARC)=3
 2. 或用"适配层"：`segment_curve` 只决定 **切点索引**，模型仍由 `_refit_circle` /
    `fit_line` + `_line_extent` / 节点吸附在 `run_s4_fit` 内完成（推荐，改动最小）。
 3. 集成后重跑：目标 bulge P95 ≤1.0 px、原子基元恰为 1 LINE + 1 ARC，且 8 个失败用例转绿。
+
+## Phase 4：Split-Only Oracle（切分预言机）——测试全绿，但 bulge 仍被降级为多段线
+
+### 已完成
+
+1. `src/s4_segment.py` 重构为**只输出切点 + 模型类型**的预言机：
+   `plan_segmentation(points, tolerance_px) -> Plan(split_indices=(220,), model_types=("LINE","ARC"))`，
+   不再返回任何拟合对象、不做端点吸附。
+2. `split_and_fit` 新增 `plan` 参数：按计划切片后，仍用**既有** `fit_line` / `fit_circle` +
+   `select_model` 拟合；后续 `_merge_same_kind`、`_line_extent`、节点吸附、`_enforce_g1`
+   全部原样执行。
+3. 配置迁移：`fitting.arc_residual_mm: 0.15`；`arc_residual_factor` 置空并在设值时抛 `DeprecationWarning`。
+4. 单模型拦截在预言机内部生效（完美正弦弧 → 1 段 ARC、完美直线 → 1 段 LINE）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 全量 `pytest` | **343 passed, 1 xfailed** —— **Phase 3 的 8 个失败用例全部转绿** ✓ |
+| `check_contracts` | `errors=0 warnings=1` |
+| 单边规划耗时 | **< 10 ms**（`test_single_edge_latency_under_red_line` 通过） |
+| line_single / arc_120 / circle_full | P95 0.219 / 0.302 / 0.126 px，五维全过 ✓ |
+| **bulge** | **1 条 LWPOLYLINE（原子计数 11 个 LINE），P95 = 13.700 px** ✗ |
+
+### 新问题（本轮未能定位完）
+
+直接调用 `split_and_fit(..., plan=plan)` 能得到**正确**的两段：
+`[('line', 221), ('circle', 273)]`，弧段 Kåsa rms 仅 0.178 px。
+但走完整 `run_pipeline` 后，`fit.primitives` 只有**一条 lwpolyline（474.8 px）**、且 `warnings` 为空。
+说明在 `split_and_fit` 返回之后、`primitives` 生成之前的某一步（`_merge_same_kind` 合并、
+`_enforce_g1` 复检、或"圆弧张角/半径合理性"检查）把 ARC 段判掉并整条降级成了多段线。
+下一轮只需在这一小段里插桩定位，不应再改动预言机与 `split_and_fit`。
+
+### 未执行的步骤（因验收不达标）
+
+- **未**把 `test_bulge_diagnosis` 的 P95 锚点收紧到 ≤1.0（当前实测 13.7，会直接红）。
+- **未**合并到 `master`：bulge 的原子基元不是 1 LINE + 1 ARC，P95 反而比 M8-3 的 10.975 更差。

@@ -541,9 +541,37 @@ def split_and_fit(
     max_segments: int,
     arc_tolerance_px: float | None = None,
     depth: int = 0,
+    plan: object | None = None,
 ) -> tuple[list[_Segment], list[str]]:
     """递归分段拟合：整段残差超限就在最大残差点切开。"""
     warnings: list[str] = []
+    # M8-4：切分预言机给出的计划（只含切点与模型类型）。拟合仍走本函数既有的
+    # fit_line / fit_circle + select_model，后处理链完全不变。
+    if plan is not None and depth == 0:
+        boundaries = [0] + [int(index) for index in getattr(plan, "split_indices", ())] + [len(points)]
+        types = list(getattr(plan, "model_types", ()))
+        segments: list[_Segment] = []
+        for position, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+            stop = end + 1 if end < len(points) else end   # 与递归切分一致：切点处共享一个点
+            chunk = points[start:stop]
+            if len(chunk) < 2:
+                continue
+            kind_hint = types[position].lower() if position < len(types) else None
+            line_model = fit_line(chunk)
+            circle_model = fit_circle(chunk) if len(chunk) >= _MIN_CIRCLE_POINTS else None
+            if kind_hint == "line":
+                model, kind = line_model, "line"
+            elif kind_hint == "arc":
+                model, kind = circle_model, "circle"
+            else:
+                kind = select_model(line_model, circle_model, n=len(chunk), alpha=alpha, prefer_arcs=prefer_arcs)
+                model = circle_model if kind == "circle" else line_model
+            if model is None:
+                continue
+            segments.append(_Segment(points=chunk, model=model, kind=kind))
+        if len(segments) > max_segments or not segments:
+            return [], warnings
+        return segments, warnings
     if len(points) < 2 or depth > _MAX_SPLIT_DEPTH:
         return [], warnings
     if len(points) < _MIN_SEGMENT_POINTS:
@@ -636,11 +664,14 @@ def run_s4_fit(
 
     mm_per_px = 25.4 / source.dpi
     tolerance_px = max(_MIN_DP_TOLERANCE_PX, float(fitting.tolerance_mm) / mm_per_px)
-    arc_residual_px = (
-        float(fitting.arc_residual_px)
-        if fitting.arc_residual_px is not None
-        else float(fitting.arc_residual_factor) * source.linewidth_px
-    )
+    # M8-4：残差判据改为**绝对毫米**，与线宽解耦。
+    if getattr(fitting, "arc_residual_factor", None) is not None:
+        warnings.warn(
+            "fitting.arc_residual_factor 已废弃（旧口径 ×线宽），请改用 fitting.arc_residual_mm；本版本忽略该值",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    arc_residual_px = float(fitting.arc_residual_mm) / mm_per_px
     min_segment_px = float(fitting.min_segment_length_linewidths) * source.linewidth_px
     close_tolerance_px = float(fitting.full_circle_close_tolerance_mm) / mm_per_px
     alpha = float(fitting.model_select_alpha)
@@ -754,6 +785,10 @@ def run_s4_fit(
             )
             continue
 
+        # M8-4：切分预言机只给"切点 + 模型类型"，拟合与后处理仍走本函数既有链路
+        from src.s4_segment import plan_segmentation
+
+        _plan = plan_segmentation(fit_points, tolerance_px=arc_residual_px)
         segments, segment_warnings = split_and_fit(
             fit_points,
             tolerance_px=tolerance_px,
@@ -761,6 +796,7 @@ def run_s4_fit(
             prefer_arcs=bool(fitting.prefer_arcs),
             max_segments=int(fitting.max_segments_per_curve),
             arc_tolerance_px=max(tolerance_px, 0.5 * arc_residual_px),
+            plan=_plan,
         )
         warnings.extend(segment_warnings)
         segments = _merge_same_kind(segments)
