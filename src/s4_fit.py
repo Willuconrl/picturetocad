@@ -613,6 +613,22 @@ def run_s4_fit(
         if edge.closed:
             circle = fit_circle(fit_points) if len(fit_points) >= _MIN_CIRCLE_POINTS else None
             if circle is not None:
+                # 用内外两轨的轮廓点复拟合：中心线在闭环上有系统偏移
+                circle = _circle_from_contours(
+                    circle, tree, contour_points, linewidth_px=source.linewidth_px
+                )
+                # rms 必须对着**中心线采样点**算：对两条轨道算出来的 RMS 恒等于半个线宽
+                # （实测 3.07px），会把"闭合误差"指标彻底污染
+                centre_residuals = (
+                    np.hypot(fit_points[:, 0] - circle.center[0], fit_points[:, 1] - circle.center[1])
+                    - circle.radius
+                )
+                circle = CircleModel(
+                    center=circle.center,
+                    radius=circle.radius,
+                    rms=float(np.sqrt(np.mean(centre_residuals**2))),
+                    n=circle.n,
+                )
                 angles = [
                     math.degrees(math.atan2(p[1] - circle.center[1], p[0] - circle.center[0])) % 360.0
                     for p in fit_points
@@ -780,9 +796,42 @@ def run_s4_fit(
                 # 与 CAD 相反。只取模长会把弧写成"补角那一段"（实测 30°–150° 的弧
                 # 被写成 278°–33°，Hausdorff 292px）。符号约定：正=图像角度递增。
                 signed = float(unwrapped[-1] - unwrapped[0])
-                sweep = signed if abs(signed) > 1e-9 else (
-                    (end_angle - start_angle) % 360.0
+                forward = signed >= 0.0
+                # 端点延伸：骨架节点比墨迹端短 1–2px，沿圆周补到墨迹端，再复拟合保持共圆
+                extended_start, extended_end = _arc_extent(
+                    model,
+                    start_angle=start_angle,
+                    end_angle=end_angle,
+                    forward=forward,
+                    tree=tree,
+                    contour_points=contour_points,
+                    linewidth_px=source.linewidth_px,
                 )
+                if (extended_start, extended_end) != (start_angle, end_angle):
+                    extra = [
+                        (model.center[0] + model.radius * math.cos(math.radians(extended_start)),
+                         model.center[1] + model.radius * math.sin(math.radians(extended_start))),
+                        (model.center[0] + model.radius * math.cos(math.radians(extended_end)),
+                         model.center[1] + model.radius * math.sin(math.radians(extended_end))),
+                    ]
+                    model = _refit_circle(model, extra)
+                    # rms 仍按中心线采样点算（复拟合用的是合成环 + 端点，不能直接拿它的 rms）
+                    centre_residuals = (
+                        np.hypot(segment.points[:, 0] - model.center[0],
+                                 segment.points[:, 1] - model.center[1]) - model.radius
+                    )
+                    model = CircleModel(
+                        center=model.center, radius=model.radius,
+                        rms=float(np.sqrt(np.mean(centre_residuals**2))), n=model.n,
+                    )
+                    start_angle = model.angle_of(extra[0])
+                    end_angle = model.angle_of(extra[1])
+                    start = (round(extra[0][0], 4), round(extra[0][1], 4))
+                    end = (round(extra[1][0], 4), round(extra[1][1], 4))
+                sweep = ((end_angle - start_angle) % 360.0 if forward
+                         else -((start_angle - end_angle) % 360.0))
+                if abs(sweep) < 1e-9:
+                    sweep = signed
                 too_rough = model.rms > arc_residual_px
                 too_small = model.radius < float(fitting.min_arc_radius_linewidths) * source.linewidth_px
                 if too_rough or too_small:
@@ -938,6 +987,98 @@ def _line_extent(
         (round(float(new_start[0]), 4), round(float(new_start[1]), 4)),
         (round(float(new_end[0]), 4), round(float(new_end[1]), 4)),
     )
+
+
+def _arc_extent(
+    model: CircleModel,
+    *,
+    start_angle: float,
+    end_angle: float,
+    forward: bool,
+    tree: cKDTree,
+    contour_points: np.ndarray,
+    linewidth_px: float,
+) -> tuple[float, float]:
+    """把弧端点沿圆周延伸到墨迹端（骨架节点比墨迹端短 1–2px）。
+
+    判据（用户确认）：沿**半径方向**找 S2 轮廓穿越点 —— 在该端 ±30° 扇区、且到圆心距离
+    落在 `r ± 0.75×线宽` 带内的轮廓点里取角向最远者；延伸量上限 2.5 px 弧长。
+    """
+    if model.radius <= 1e-9:
+        return start_angle, end_angle
+    max_extension_deg = math.degrees(2.5 / model.radius)
+
+    def extend(angle_deg: float, direction: float) -> float:
+        probe = math.radians(angle_deg)
+        probe_point = (
+            model.center[0] + model.radius * math.cos(probe),
+            model.center[1] + model.radius * math.sin(probe),
+        )
+        neighbours = tree.query_ball_point(probe_point, max(3.0, 2.0 * linewidth_px))
+        if not neighbours:
+            return 0.0
+        subset = contour_points[np.asarray(neighbours)]
+        radial = np.hypot(subset[:, 0] - model.center[0], subset[:, 1] - model.center[1])
+        band = np.abs(radial - model.radius) <= max(1.0, 0.75 * linewidth_px)
+        if not band.any():
+            return 0.0
+        angles = np.degrees(np.arctan2(subset[band, 1] - model.center[1],
+                                       subset[band, 0] - model.center[0]))
+        delta = np.angle(np.exp(1j * np.radians(angles - angle_deg)), deg=True)
+        sector = np.abs(delta) <= 30.0
+        if not sector.any():
+            return 0.0
+        candidates = delta[sector] * direction
+        positive = candidates[candidates > 0.0]
+        if positive.size == 0:
+            return 0.0
+        return float(min(positive.max(), max_extension_deg))
+
+    if forward:
+        return start_angle - extend(start_angle, -1.0), end_angle + extend(end_angle, +1.0)
+    return start_angle + extend(start_angle, +1.0), end_angle - extend(end_angle, -1.0)
+
+
+def _refit_circle(model: CircleModel, extra_points: list[tuple[float, float]]) -> CircleModel:
+    """延伸端点后复拟合，保证新端点仍与圆共形（用户确认：必须复拟合）。"""
+    if not extra_points:
+        return model
+    count = max(16, int(2 * math.pi * model.radius))
+    angles = np.linspace(0.0, 2 * math.pi, count, endpoint=False)
+    ring = np.column_stack([
+        model.center[0] + model.radius * np.cos(angles),
+        model.center[1] + model.radius * np.sin(angles),
+    ])
+    points = np.vstack([ring, np.asarray(extra_points, dtype=np.float64).reshape(-1, 2)])
+    refined = refine_circle_lm(points, model)
+    return refined if (np.isfinite(refined.radius) and refined.radius > 0) else model
+
+
+def _circle_from_contours(
+    model: CircleModel, tree: cKDTree, contour_points: np.ndarray, *, linewidth_px: float
+) -> CircleModel:
+    """用**内外两条轨道**的轮廓点复拟合圆：两轨对称，圆心/半径偏差互相抵消。
+
+    中心线重构在闭环上有系统偏移（实测圆心偏 (0.045,0.079)mm、半径 +0.037mm）。
+    """
+    count = max(16, int(2 * math.pi * model.radius / 2.0))
+    angles = np.linspace(0.0, 2 * math.pi, count, endpoint=False)
+    probes = np.column_stack([
+        model.center[0] + model.radius * np.cos(angles),
+        model.center[1] + model.radius * np.sin(angles),
+    ])
+    indices: set[int] = set()
+    for probe in probes:
+        indices.update(tree.query_ball_point(probe, max(2.0, 1.2 * linewidth_px)))
+    if len(indices) < _MIN_CIRCLE_POINTS * 4:
+        return model
+    subset = contour_points[sorted(indices)]
+    radial = np.hypot(subset[:, 0] - model.center[0], subset[:, 1] - model.center[1])
+    band = np.abs(radial - model.radius) <= max(1.5, 0.75 * linewidth_px)
+    if int(band.sum()) < _MIN_CIRCLE_POINTS * 4:
+        return model
+    refined = refine_circle_lm(subset[band], model)
+    return refined if refined.radius > 0 else model
 
 
 def _enforce_g1(

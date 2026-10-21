@@ -47,15 +47,15 @@ MM_PER_PX = 25.4 / DPI
 SPACING_MM = 0.02
 DIM_REL_TOL = 0.005
 
-#: 实测偏差（M7-Golden 首轮 + 几何修复补丁），用于把 xfail 的原因写清楚
+#: 实测偏差（M7-Golden 各轮修复后），用于把 xfail 的原因写清楚
 MEASURED = {
-    "synthetic_line_single": "P95=0.800px(>0.5)、端点偏 0.13/0.15mm、图层 LINES_W0.50 vs golden LINES_W0.35"
-    "（合成图实测墨宽≈0.47mm，golden 标签 0.35 本身与墨迹不一致，属 fixture 口径问题）",
-    "synthetic_circle_full": "P95=1.499px(>0.5)、圆心偏 (0.045,0.079)mm、半径 12.037 vs 12.000（+0.31%）",
-    "synthetic_arc_120": "P95=0.671px(>0.5)【方向已修：292.3px → 0.671px】、扫角 114.4° vs 120°"
-    "（S4 端点由节点投影、短于墨迹，弧长差 ≈1.46mm）",
-    "synthetic_polyline_bulge": "P95=92.7px、原子计数 2×LINE vs golden 1×LINE+1×ARC：该弧被判过糙而回退成折线",
+    "synthetic_line_single": "P95=0.547px(>0.5)、关键尺寸 0.0465mm ✓、图层 ✓；仅 Hausdorff 差 0.047px",
+    "synthetic_arc_120": "P95=0.394px ✓、关键尺寸 0.0514mm（超 0.05 仅 0.0014mm）；仅扫角差 5.6°",
+    "synthetic_polyline_bulge": "P95=9.218px、1 ARC + 3 LINE vs 1 LINE + 1 ARC、图层 LINES_W0.35 vs 0.50",
 }
+
+#: 已全部达标的场景（不挂 xfail）
+PASSING_SCENES = ("synthetic_circle_full",)
 
 
 @pytest.fixture(scope="module")
@@ -106,7 +106,12 @@ def reports(cfg: R2VConfig) -> dict[str, dict]:
 
 @pytest.mark.parametrize(
     "scene",
-    [pytest.param(name, marks=pytest.mark.xfail(reason=MEASURED[name], strict=False)) for name in SCENES],
+    [
+        pytest.param(name)
+        if name in PASSING_SCENES
+        else pytest.param(name, marks=pytest.mark.xfail(reason=MEASURED[name], strict=False))
+        for name in SCENES
+    ],
 )
 def test_scene_meets_all_five_criteria(scene: str, reports: dict[str, dict]) -> None:
     report = reports[scene]
