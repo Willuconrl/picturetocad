@@ -569,6 +569,9 @@ def split_corners(
         for edge_id in sorted(graph.edges):
             edge = graph.edges[edge_id]
             if edge["a"] == edge["b"]:
+                # 闭合环暂不做拐点切分：环的追踪在 8 连通下可能退化成螺旋，
+                # 强切会把一个圆切成 4 段（实测 S4 因此测不出 CIRCLE）。
+                # 图框等闭合多边形的拐点切分留待 M7 与 S8 一起处理，见 README 已知限制。
                 continue
             points = _rdp(edge["points"], simplify_tol)
             if len(points) < 3:
@@ -626,6 +629,31 @@ def _classify(
                     return "tee"
         return "wye"
     return "cross"
+
+
+def _components(mask: np.ndarray) -> list[np.ndarray]:
+    """8 邻域连通分量（返回每块的布尔 mask，顺序按最小像素坐标排序，保证确定性）。"""
+    remaining = mask.copy()
+    components: list[np.ndarray] = []
+    ys, xs = np.nonzero(remaining)
+    for y, x in sorted(zip(ys.tolist(), xs.tolist()), key=lambda p: (p[0], p[1])):
+        if not remaining[y, x]:
+            continue
+        stack = [(x, y)]
+        remaining[y, x] = False
+        members: list[tuple[int, int]] = []
+        while stack:
+            cx, cy = stack.pop()
+            members.append((cx, cy))
+            for nx, ny in _neighbours(cx, cy):
+                if 0 <= ny < mask.shape[0] and 0 <= nx < mask.shape[1] and remaining[ny, nx]:
+                    remaining[ny, nx] = False
+                    stack.append((nx, ny))
+        block = np.zeros_like(mask, dtype=bool)
+        for cx, cy in members:
+            block[cy, cx] = True
+        components.append(block)
+    return components
 
 
 def _loop_parts(
@@ -700,13 +728,28 @@ def build_graph(
             closed=edge.a == edge.b,
         )
 
-    if not raw_edges and not clusters:  # 纯环（没有节点像素）
-        node_coords, loop_edges = _loop_parts(skeleton)
-        for cx, cy in node_coords:
-            graph.add_node(float(cx), float(cy))
-        for a, b, points, closed in loop_edges:
-            graph.add_edge(a, b, _rdp(points, _RDP_TOLERANCE_PX),
-                           linewidth_px=linewidth_px, closed=closed)
+    covered = np.zeros_like(skeleton, dtype=bool)
+    for edge in raw_edges:
+        for x, y in edge.pixels:
+            covered[y, x] = True
+    remaining = skeleton & ~covered
+    if remaining.any():
+        # 没有节点的纯环（矩形框、圆环）：之前只要图里有任何节点，这些环就会被整条丢掉
+        # （实测：图框矩形的骨架凭空消失，S4 只拟出内部那根线）
+        for component in _components(remaining):
+            node_coords, loop_edges = _loop_parts(component)
+            local_ids = [graph.add_node(float(cx), float(cy)) for cx, cy in node_coords]
+            sample_edge = raw_edges[0] if raw_edges else None
+            width = sample_edge.pixels if sample_edge else []
+            local_width = linewidth_px
+            if width:
+                values = [2.0 * float(distance[y, x]) for x, y in width]
+                local_width = float(np.median(values)) if values else linewidth_px
+            for a, b, points, closed in loop_edges:
+                graph.add_edge(
+                    local_ids[a], local_ids[b], _rdp(points, _RDP_TOLERANCE_PX),
+                    linewidth_px=local_width, closed=closed,
+                )
 
     raw_nodes = len(graph.nodes)
     raw_edge_count = len(graph.edges)
