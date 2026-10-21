@@ -51,6 +51,7 @@ r2v --list-presets                            # 列出四套预设
 | `docs/` | `LICENSES.md`：依赖许可证清单（由 `scripts/gen_licenses.py` 从已安装 metadata 生成） |
 | `outputs/` | 运行时产物：`metrics_<stage>.json`、`manifest.json`、`debug/overlay_*.png` |
 | `specs/` | `SPEC.md`：误差预算与逐阶段验收标准（真相源） |
+| `docs/` | `LICENSES.md`（依赖许可证）、`coordinate_system.md`（跨模块坐标契约） |
 
 配置参数只写 `config.yaml`（数值真相源），由 `src/config.py` 的 pydantic schema 校验；
 预设只写差量覆盖，见 `config.yaml` 的 `presets` 段。
@@ -67,7 +68,9 @@ r2v --list-presets                            # 列出四套预设
   锐度阈值收紧到 0.8；许可证改为「metadata → 包内 LICENSE 文件」两级判定。
 - **M3 完成**：`src/s2_binarize.py`（四路二值化 + foreground_stability 选优 + 形态学清理 +
   沿法线的 50% 电平亚像素边缘 + 逐点线宽 + `metrics_s2.json`）。
-- 后续：S3 骨架化与拓扑重建 → S4 几何拟合 → … → S8 组装（见 `specs/SPEC.md` §4）。
+- **M4 完成**：`src/s3_skeleton.py`（细化/中轴双路径 + 毛刺修剪 + 共线合并 + 拐点切分 +
+  节点分类 + 断线桥接 + `graph.json`/`metrics_s3.json`）；坐标契约固化在 `docs/coordinate_system.md`。
+- 后续：S4 几何拟合 → S5 线宽分层 → … → S8 组装（见 `specs/SPEC.md` §4）。
 
 ## 已知限制
 
