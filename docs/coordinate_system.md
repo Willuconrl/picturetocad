@@ -64,3 +64,21 @@ pixel_points = t.inverse().apply(cad_points)             # 逆变换必须可用
 
 `Transform2D` 的矩阵是 3×3 齐次、float64；缩放/平移/旋转/翻转全部由它承担，
 并要求 `inverse()` 可逆（奇异矩阵会抛 `ValueError`）。
+
+## 接头端点必须逐位相等（S4 起生效）
+
+相邻基元在共享节点处**必须引用同一个 float64 坐标**，不允许各自拟合出一个"几乎相同"
+的端点：
+
+- S4 维护一张共享节点表 `nodes: {node_id: (x, y)}`，所有基元写出的 `start` / `end`
+  直接取自该表，并统一 `round(…, 4)`；
+- 于是 `a.end == b.start` 是**逐位相等**，测试用 `==` 断言，**禁止**用 `np.allclose`；
+- 理由：接头缝隙（哪怕 1e-6 mm）在 CNC/CAM 的轮廓链里会被当成断点，属于致命问题；
+  而"两条各自拟合的线在数学上几乎相交"是精度问题，不是拓扑问题——两者不能混。
+
+```python
+# tests/test_s4_fit.py 里的断言方式
+shared = [p for p in primitives if p.node_b == node_id]
+assert {p.end for p in shared} == {nodes[node_id]}          # 同一个值
+assert line_a.end == line_b.start                            # 逐位相等
+```

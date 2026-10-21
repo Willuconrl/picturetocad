@@ -70,7 +70,9 @@ r2v --list-presets                            # 列出四套预设
   沿法线的 50% 电平亚像素边缘 + 逐点线宽 + `metrics_s2.json`）。
 - **M4 完成**：`src/s3_skeleton.py`（细化/中轴双路径 + 毛刺修剪 + 共线合并 + 拐点切分 +
   节点分类 + 断线桥接 + `graph.json`/`metrics_s3.json`）；坐标契约固化在 `docs/coordinate_system.md`。
-- 后续：S4 几何拟合 → S5 线宽分层 → … → S8 组装（见 `specs/SPEC.md` §4）。
+- **M5 完成**：`src/s4_fit.py`（S2 轮廓重建中心线 → DP 分段 → 直线 TLS / 圆 Kåsa+LM →
+  BIC+F 检验竞争 → 完整圆判定 → G1 复检 → LWPOLYLINE 回退 + `primitives.json`/`metrics_s4.json`）。
+- 后续：S5 线宽分层 → S6 文字 OCR → S7 配准 → S8 DXF 组装（见 `specs/SPEC.md` §4）。
 
 ## 已知限制
 

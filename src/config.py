@@ -469,6 +469,7 @@ class FittingConfig(_Section):
     arc_residual_factor: float = Field(..., gt=0)
     arc_residual_px: float | None
     prefer_arcs: bool
+    model_select_alpha: float = Field(..., gt=0, lt=1, description="F 检验显著性水平（模型竞争）")
     full_circle_min_coverage_deg: float = Field(..., gt=0, le=360)
     full_circle_close_tolerance_mm: float = Field(..., gt=0)
     min_segment_length_linewidths: float = Field(..., gt=0)
