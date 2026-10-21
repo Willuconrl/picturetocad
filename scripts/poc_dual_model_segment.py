@@ -60,6 +60,42 @@ DEFAULT_LAMBDA = 1.0
 MODEL_PAIRS = (("line", "line"), ("line", "arc"), ("arc", "line"))
 
 
+class PrefixLineSSE:
+    """用积分图（prefix sums）把**直线 TLS 的残差平方和**降到 O(1)。
+
+    数学依据：过质心的直线 TLS 拟合，其残差平方和**等于散布矩阵的最小特征值**：
+        S = [[Sxx, Sxy], [Sxy, Syy]]，λ_min = (Sxx+Syy)/2 − sqrt(((Sxx−Syy)/2)² + Sxy²)
+    而 Sxx/Syy/Sxy 都可以由 Σx, Σy, Σxx, Σyy, Σxy 的区间差 O(1) 求出。
+    """
+
+    def __init__(self, points: np.ndarray) -> None:
+        x = points[:, 0]
+        y = points[:, 1]
+        self._n = np.concatenate([[0], np.arange(1, len(points) + 1)])
+        self._sx = np.concatenate([[0.0], np.cumsum(x)])
+        self._sy = np.concatenate([[0.0], np.cumsum(y)])
+        self._sxx = np.concatenate([[0.0], np.cumsum(x * x)])
+        self._syy = np.concatenate([[0.0], np.cumsum(y * y)])
+        self._sxy = np.concatenate([[0.0], np.cumsum(x * y)])
+
+    def sse(self, start: int, end: int) -> float:
+        """区间 [start, end) 的直线 TLS SSE。"""
+        n = float(self._n[end] - self._n[start])
+        if n < 2:
+            return float("inf")
+        sx = self._sx[end] - self._sx[start]
+        sy = self._sy[end] - self._sy[start]
+        sxx = self._sxx[end] - self._sxx[start]
+        syy = self._syy[end] - self._syy[start]
+        sxy = self._sxy[end] - self._sxy[start]
+        cxx = sxx - sx * sx / n
+        cyy = syy - sy * sy / n
+        cxy = sxy - sx * sy / n
+        half = (cxx + cyy) / 2.0
+        disc = math.sqrt(max(((cxx - cyy) / 2.0) ** 2 + cxy * cxy, 0.0))
+        return float(max(half - disc, 0.0))
+
+
 def _fit(kind: str, points: np.ndarray, *, refine: bool = False):
     """返回 (模型, SSE, 参数个数)。LINE=2 参数，ARC=3 参数。
 
@@ -88,14 +124,30 @@ def _fit(kind: str, points: np.ndarray, *, refine: bool = False):
     return model, float(np.sum(residuals**2)), 3
 
 
-def evaluate_split(points: np.ndarray, k: int, kind_pair: tuple[str, str], lam: float, n: int):
-    _m1, sse1, p1 = _fit(kind_pair[0], points[:k])
-    _m2, sse2, p2 = _fit(kind_pair[1], points[k:])
-    if not np.isfinite(sse1) or not np.isfinite(sse2):
-        return None
-    sse = sse1 + sse2
-    cost = sse + lam * math.log(max(n, 2)) * (p1 + p2)
-    return cost, sse, sse1, sse2
+def evaluate_split(
+    points: np.ndarray,
+    k: int,
+    kind_pair: tuple[str, str],
+    lam: float,
+    n: int,
+    prefix: "PrefixLineSSE",
+):
+    """评分一个切点。直线侧用积分图 SSE（O(1)），圆弧侧用 Kåsa 代数解。"""
+    sses: list[float] = []
+    params = 0
+    for kind, sl in ((kind_pair[0], slice(0, k)), (kind_pair[1], slice(k, n))):
+        if kind == "line":
+            sse = prefix.sse(sl.start or 0, sl.stop)
+            params += 2
+        else:
+            _model, sse, p = _fit("arc", points[sl])
+            params += p
+        if not math.isfinite(sse):
+            return None
+        sses.append(sse)
+    sse = sses[0] + sses[1]
+    cost = sse + lam * math.log(max(n, 2)) * params
+    return cost, sse, sses[0], sses[1]
 
 
 def best_split(points: np.ndarray, *, lam: float = DEFAULT_LAMBDA, tol_px: float = 1.0):
@@ -104,13 +156,14 @@ def best_split(points: np.ndarray, *, lam: float = DEFAULT_LAMBDA, tol_px: float
     if n < 2 * MIN_POINTS:
         return None
     pairs = MODEL_PAIRS
+    prefix = PrefixLineSSE(points)
     t0 = time.perf_counter()
 
     def scan(candidates):
         best = None
         for k in candidates:
             for pair in pairs:
-                result = evaluate_split(points, k, pair, lam, n)
+                result = evaluate_split(points, k, pair, lam, n, prefix)
                 if result is None:
                     continue
                 cost = result[0]

@@ -49,3 +49,62 @@ Cost(k) = SSE(k) + λ · ln(n) · p(M1,M2)        # p(LINE)=2, p(ARC)=3
 - 必须先做「积分图直线 SSE」优化并实测 <10 ms，**否则不得合入主分支**（用户红线）；
 - 集成时 `arc_residual` 改为**绝对毫米**口径（配置与日志统一 mm，内部按 DPI 换算 px）；
 - 集成后需重跑 `synthetic_polyline_bulge` 的 golden 回归，目标 P95 ≤0.5 px。
+
+## Phase 2：积分图 SSE 优化（性能红线已满足）
+
+### 实现
+
+`PrefixLineSSE`：过质心的 TLS 直线残差平方和 = 散布矩阵最小特征值
+`λ_min = (Sxx+Syy)/2 − sqrt(((Sxx−Syy)/2)² + Sxy²)`，
+而 `Sxx/Syy/Sxy` 由 `Σx, Σy, Σxx, Σyy, Σxy` 的区间前缀和 O(1) 求出。
+扫描阶段的直线 SSE **全部**改走积分图（不再有朴素 `fit_line` 回退路径）；
+圆弧仍走 Kåsa（隔点采样），仅最终胜者做 LM 精化。
+
+### 数值一致性（`rtol=1e-5` 判据）
+
+| 区间 | 朴素 SSE | 积分图 SSE | 相对误差 |
+|---|---|---|---|
+| [0,200) | 9.4675568175 | 9.4675568175 | 7.5e-13 |
+| [10,150) | 6.0426375814 | 6.0426375814 | 5.0e-13 |
+| [50,90) | 1.2486247837 | 1.2486247837 | 4.3e-14 |
+| [3,7) | 0.0972301240 | 0.0972301240 | 0 |
+
+**通过**（最大相对误差 7.5e-13 ≪ 1e-5），已固化为 `tests/test_s4_segment.py::test_integral_sse_matches_naive_fit`。
+
+### 性能（bulge 边：493 点 / 505 px）
+
+| 阶段 | 优化前 | 优化后 |
+|---|---|---|
+| 扫描 | 13.62 ms | **4.11 ms** |
+| LM 精化 | 0.67 ms | 0.78 ms |
+| **合计** | **14.29 ms** | **4.89 ms** |
+
+**红线（<10 ms）已满足**，余量 51%。已固化为
+`tests/test_s4_segment.py::test_single_edge_latency_under_red_line`。
+
+### 切分结果（优化后不变）
+
+`line(220) + arc(273)`，弧段 273 点 = golden 弧长 273 px，两侧 RMS 0.146 / 0.178 px。
+
+### 管线集成：本轮**未合入**（回滚）
+
+把 `run_s4_fit` 的分段调用换成 `segment_curve` 后，全量测试出现 **4 个失败**：
+
+| 失败用例 | 现象 |
+|---|---|
+| `test_arc_radius_and_center[60.0]` | 半径/圆心判据超差 |
+| `test_arc_radius_and_center[80.0]` | 同上 |
+| `test_shared_endpoints_are_bitwise_equal` | 相邻基元端点不再逐位相等 |
+| `test_s8_dxf.py::test_line_and_arc_roundtrip` | ARC 半径断言 22.6906 != 期望值 |
+
+原因（初判）：新分段器对**纯弧边**也可能选出 `line+arc` 组合（BIC 惩罚不足以排除），
+把一条完整圆弧切成"短直线 + 弧"，进而改变端点与半径。按"数值验证不通过不得集成"的
+硬约束，本轮**回滚了 `run_s4_fit` 与配置改动**，只提交经单测验证的模块与 PoC。
+
+### 下一轮（集成）必做
+
+1. 纯弧边保护：`best_split` 之前先做整段圆弧拟合，若整段 RMS ≤ 容差且圆心/半径稳定，
+   直接判为单 ARC（不做切分）；
+2. `_make_segment` 的端点必须由相邻段共享（复用 S3 节点），保证逐位相等；
+3. `arc_residual_mm` + `arc_residual_factor` 废弃告警的配置迁移（本轮已写好补丁但随集成回滚）；
+4. 集成后再跑 golden：目标 bulge P95 ≤1.0 px、原子基元恰为 1 LINE + 1 ARC。
