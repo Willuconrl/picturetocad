@@ -667,7 +667,25 @@ def run_s4_fit(
         )
         warnings.extend(segment_warnings)
         if not segments:
-            # 分段失败/超上限 → 整条边降级为多段线（不丢几何）
+            # 分段失败/超上限 → 整条边降级为多段线（不丢几何）。
+            # 只有 2 个点时写成 LINE：2 点 LWPOLYLINE 是退化实体，golden 也不认。
+            if len(simplified) == 2:
+                start = (round(float(simplified[0][0]), 4), round(float(simplified[0][1]), 4))
+                end = (round(float(simplified[1][0]), 4), round(float(simplified[1][1]), 4))
+                emit(
+                    kind="line",
+                    node_a=None,
+                    node_b=None,
+                    start=start,
+                    end=end,
+                    length_px=round(
+                        float(np.hypot(end[0] - start[0], end[1] - start[1])), 4
+                    ),
+                    rms_px=0.0,
+                    source_edge_ids=(edge.id,),
+                    reason="fallback_two_points",
+                )
+                continue
             emit(
                 kind="lwpolyline",
                 points=tuple((round(float(p[0]), 4), round(float(p[1]), 4)) for p in simplified),
@@ -758,9 +776,12 @@ def run_s4_fit(
                     end_angle = model.angle_of(projected)
                 else:
                     end_angle = angles[-1]
-                sweep = (
-                    (end_angle - start_angle) % 360.0 if forward
-                    else (start_angle - end_angle) % 360.0
+                # 扫角必须**带符号**：图像系 Y 向下时，同一段弧的图像角度变化方向
+                # 与 CAD 相反。只取模长会把弧写成"补角那一段"（实测 30°–150° 的弧
+                # 被写成 278°–33°，Hausdorff 292px）。符号约定：正=图像角度递增。
+                signed = float(unwrapped[-1] - unwrapped[0])
+                sweep = signed if abs(signed) > 1e-9 else (
+                    (end_angle - start_angle) % 360.0
                 )
                 too_rough = model.rms > arc_residual_px
                 too_small = model.radius < float(fitting.min_arc_radius_linewidths) * source.linewidth_px
@@ -789,7 +810,7 @@ def run_s4_fit(
                         start_angle_deg=round(start_angle, 4),
                         end_angle_deg=round(end_angle, 4),
                         sweep_deg=round(sweep, 4),
-                        length_px=round(math.radians(sweep) * model.radius, 4),
+                        length_px=round(abs(math.radians(sweep)) * model.radius, 4),
                         rms_px=round(model.rms, 4),
                         source_edge_ids=(edge.id,),
                     )

@@ -47,12 +47,14 @@ MM_PER_PX = 25.4 / DPI
 SPACING_MM = 0.02
 DIM_REL_TOL = 0.005
 
-#: 实测偏差（M7-Golden 首轮），用于把 xfail 的原因写清楚
+#: 实测偏差（M7-Golden 首轮 + 几何修复补丁），用于把 xfail 的原因写清楚
 MEASURED = {
-    "synthetic_line_single": "P95=0.800px(>0.5)、图层 LINES_W0.50 vs golden LINES_W0.35（笔宽 +0.06mm 越档）",
-    "synthetic_circle_full": "P95=1.499px(>0.5)、半径 12.037 vs 12.000mm（+0.31%，关键尺寸 0.037mm 内）",
-    "synthetic_arc_120": "P95=292.3px：ARC 角向区间写错（圆心/半径正确 14.991 vs 15.0）",
-    "synthetic_polyline_bulge": "P95=92.7px、原子计数 2×LINE vs golden 1×LINE+1×ARC、图层 LINES_W0.18 vs 0.35",
+    "synthetic_line_single": "P95=0.800px(>0.5)、端点偏 0.13/0.15mm、图层 LINES_W0.50 vs golden LINES_W0.35"
+    "（合成图实测墨宽≈0.47mm，golden 标签 0.35 本身与墨迹不一致，属 fixture 口径问题）",
+    "synthetic_circle_full": "P95=1.499px(>0.5)、圆心偏 (0.045,0.079)mm、半径 12.037 vs 12.000（+0.31%）",
+    "synthetic_arc_120": "P95=0.671px(>0.5)【方向已修：292.3px → 0.671px】、扫角 114.4° vs 120°"
+    "（S4 端点由节点投影、短于墨迹，弧长差 ≈1.46mm）",
+    "synthetic_polyline_bulge": "P95=92.7px、原子计数 2×LINE vs golden 1×LINE+1×ARC：该弧被判过糙而回退成折线",
 }
 
 

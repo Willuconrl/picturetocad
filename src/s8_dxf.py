@@ -148,14 +148,43 @@ def _primitive_points(primitive: Primitive) -> list[tuple[float, float]]:
         if primitive.center is None or primitive.radius_px is None:
             raise DxfAssemblyError(f"ARC 基元 {primitive.id} 缺少圆心/半径")
         sweep = primitive.sweep_deg or 0.0
-        if primitive.start_angle_deg is None or sweep <= 0.0:
-            raise DxfAssemblyError(f"ARC 基元 {primitive.id} 扫角非正（{sweep}），无法写成 CCW 弧")
+        if primitive.start_angle_deg is None or abs(sweep) < 1e-9:
+            raise DxfAssemblyError(f"ARC 基元 {primitive.id} 扫角为 0，无法写出")
         return _arc_points(primitive.center, primitive.radius_px, primitive.start_angle_deg, sweep)
     if primitive.points:
         return list(primitive.points)
     if primitive.start and primitive.end:
         return [primitive.start, primitive.end]
     raise DxfAssemblyError(f"基元 {primitive.id}({primitive.kind}) 没有可用几何")
+
+
+def _angle_deg(point: tuple[float, float], center: tuple[float, float]) -> float:
+    return math.degrees(math.atan2(point[1] - center[1], point[0] - center[0])) % 360.0
+
+
+def _arc_point(primitive: Primitive, *, at_start: bool | None) -> tuple[float, float]:
+    """取弧的起点 / 终点 / 中点（图像像素系）。"""
+    assert primitive.center is not None and primitive.radius_px is not None
+    center = primitive.center
+    radius = primitive.radius_px
+    start_deg = primitive.start_angle_deg or 0.0
+    sweep = primitive.sweep_deg or 0.0
+    if at_start is None:
+        angle = math.radians(start_deg + sweep / 2.0)
+    elif at_start:
+        angle = math.radians(start_deg)
+    else:
+        angle = math.radians(start_deg + sweep)
+    return (center[0] + radius * math.cos(angle), center[1] + radius * math.sin(angle))
+
+
+def _to_cad_points(
+    points: Sequence[tuple[float, float]], mm_per_px: float, writer: DXFWriter
+) -> list[tuple[float, float]]:
+    """把图像像素点换算成**最终 CAD 坐标**（走 writer 的翻转 + 世界矩阵）。"""
+    array = np.asarray(points, dtype=np.float64) * mm_per_px
+    cad = writer._to_cad(array)  # noqa: SLF001 - 与写出端共用同一套变换，避免两套口径
+    return [(float(row[0]), float(row[1])) for row in cad]
 
 
 def _chain_closed_loop(primitives: Sequence[Primitive], *, tolerance_px: float) -> list[tuple[float, float]]:
@@ -308,11 +337,28 @@ def run_s8_dxf(
             record("LINE", layer)
         elif primitive.kind == "arc":
             assert primitive.center is not None and primitive.radius_px is not None
+            # 角度必须先在 **CAD 系**里定出来，再换算成 DXFWriter 期望的"图像系原始角"。
+            # DXFWriter 会做 sa=-ea_raw、ea=-sa_raw 的镜像；直接传图像系角度时，
+            # 弧的方向约定（图像 Y 向下时 CCW 与 CAD 相反）会让扫角落到错误的象限
+            # （实测 30°–150° 的弧被写成 278°–33°，Hausdorff 冲到 292px）。
+            center_px = primitive.center
+            start_pt = _arc_point(primitive, at_start=True)
+            end_pt = _arc_point(primitive, at_start=False)
+            mid_pt = _arc_point(primitive, at_start=None)
+            cad = _to_cad_points([center_px, start_pt, end_pt, mid_pt], mm_per_px, writer)
+            a_start = _angle_deg(cad[1], cad[0])
+            a_end = _angle_deg(cad[2], cad[0])
+            a_mid = _angle_deg(cad[3], cad[0])
+            # 选包含中点的那个 CCW 区间（DXF 的 ARC 只能逆时针）
+            if (a_mid - a_start) % 360.0 <= (a_end - a_start) % 360.0:
+                ccw_start, ccw_end = a_start, a_end
+            else:
+                ccw_start, ccw_end = a_end, a_start
             writer.add_arc(
-                (primitive.center[0] * mm_per_px, primitive.center[1] * mm_per_px),
+                (center_px[0] * mm_per_px, center_px[1] * mm_per_px),
                 primitive.radius_px * mm_per_px,
-                primitive.start_angle_deg or 0.0,
-                (primitive.start_angle_deg or 0.0) + (primitive.sweep_deg or 0.0),
+                (-ccw_end) % 360.0 if writer._reflected else ccw_start,  # noqa: SLF001
+                (-ccw_start) % 360.0 if writer._reflected else ccw_end,  # noqa: SLF001
                 layer=layer, linewidth_mm=width,
             )
             record("ARC", layer)
