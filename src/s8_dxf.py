@@ -61,6 +61,8 @@ class SelfCheckReport(BaseModel):
     max_coord_delta_mm: float
     layers_read_back: tuple[str, ...]
     closed_polylines: int
+    text_written: int = 0
+    text_skipped_low_confidence: int = 0
     passed: bool
     problems: tuple[str, ...]
 
@@ -227,6 +229,7 @@ def run_s8_dxf(
     out_dir: str | Path | None = None,
     file_name: str = "drawing.dxf",
     pending_ocr_regions: Sequence[Sequence[float]] = (),
+    text_items: Sequence[dict[str, Any]] = (),
 ) -> tuple[S8Result, StageMetrics]:
     """S8 主流程：几何 + 图层 + 尺度 → DXF（含回读自检）。"""
     t0 = time.perf_counter()
@@ -379,6 +382,38 @@ def run_s8_dxf(
 
     out = Path(out_dir) if out_dir is not None else Path.cwd()
     out.mkdir(parents=True, exist_ok=True)
+    # 3) TEXT：置信度达标的写实体，占位条目只写掩膜（灰色虚线框）
+    confidence_min = float(cfg.text.ocr.text_confidence_min)
+    written_texts = 0
+    skipped_texts = 0
+    placeholder_boxes: list[tuple[float, float, float, float]] = []
+    for item in text_items:
+        confidence = float(item.get("confidence", 0.0))
+        is_placeholder = bool(item.get("is_placeholder", True))
+        insertion = item.get("insertion_point") or [0.0, 0.0]
+        x_mm, y_mm = float(insertion[0]), float(insertion[1])
+        height_mm = float(item.get("height_mm", 0.0))
+        text_value = str(item.get("text", ""))
+        if is_placeholder or confidence < confidence_min or not text_value:
+            skipped_texts += 1
+            width_mm = height_mm * max(1.0, float(len(text_value) or 1)) * 0.6
+            placeholder_boxes.append((x_mm / mm_per_px, y_mm / mm_per_px,
+                                      width_mm / mm_per_px, height_mm / mm_per_px))
+            continue
+        writer.add_text(
+            text_value,
+            (x_mm / mm_per_px, y_mm / mm_per_px),
+            height_mm,
+            layer="TEXT",
+            xdata={
+                "line_id": item.get("line_id", ""),
+                "engine": item.get("engine", "none"),
+                "confidence": f"{confidence:.6f}",
+            },
+        )
+        record("TEXT", "TEXT")
+        written_texts += 1
+
     dxf_path = out / file_name
     report = writer.save(
         dxf_path,
@@ -398,6 +433,8 @@ def run_s8_dxf(
         closed_polylines=closed_polylines,
         passed=bool(report.get("ok", False)),
         problems=problems,
+        text_written=written_texts,
+        text_skipped_low_confidence=skipped_texts,
     )
 
     result = S8Result(
@@ -420,6 +457,8 @@ def run_s8_dxf(
             "circles": entity_counts.get("CIRCLE", 0),
             "polylines": entity_counts.get("LWPOLYLINE", 0),
             "closed_polylines": closed_polylines,
+            "text_written": written_texts,
+            "text_skipped_low_confidence": skipped_texts,
             "pending_ocr_regions": len(pending_ocr_regions),
             "warnings": len(warnings),
         },
@@ -437,14 +476,38 @@ def run_s8_dxf(
             "project_name": writer.doc.header.get("$PROJECTNAME", ""),
             "pending_ocr_bboxes": [list(map(float, box)) for box in pending_ocr_regions],
             "self_check_passed": self_check.passed,
+            "text_confidence_min": confidence_min,
         },
     )
 
     if out_dir is not None:
         write_json(out / "s8_report.json", result.to_json())
         write_metrics(out, metrics)
+        if placeholder_boxes:
+            _write_debug_overlay(out / "debug" / "overlay_s8.png", width_px, height_px, placeholder_boxes)
 
     return result, metrics
+
+
+def _write_debug_overlay(
+    path: Path, width_px: int, height_px: int, boxes: Sequence[tuple[float, float, float, float]]
+) -> None:
+    """被跳过的文字条目：灰色虚线框标注位置（便于人工排查低置信度原因）。"""
+    import cv2
+
+    canvas = np.full((height_px, width_px, 3), 255, np.uint8)
+    for x, y, w, h in boxes:
+        p1 = (int(round(x)), int(round(y)))
+        p2 = (int(round(x + w)), int(round(y + h)))
+        # 虚线：按 6px 画、4px 空
+        for offset in range(0, max(1, p2[0] - p1[0]), 10):
+            cv2.line(canvas, (p1[0] + offset, p1[1]), (min(p1[0] + offset + 6, p2[0]), p1[1]), (128, 128, 128), 1)
+            cv2.line(canvas, (p1[0] + offset, p2[1]), (min(p1[0] + offset + 6, p2[0]), p2[1]), (128, 128, 128), 1)
+        for offset in range(0, max(1, p2[1] - p1[1]), 10):
+            cv2.line(canvas, (p1[0], p1[1] + offset), (p1[0], min(p1[1] + offset + 6, p2[1])), (128, 128, 128), 1)
+            cv2.line(canvas, (p2[0], p1[1] + offset), (p2[0], min(p1[1] + offset + 6, p2[1])), (128, 128, 128), 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), canvas)
 
 
 __all__ = [

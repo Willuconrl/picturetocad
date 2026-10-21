@@ -21,6 +21,17 @@
 | pytest | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ | metadata: License-Expression |
 | hypothesis | 6.168.5 | MPL-2.0 | https://hypothesis.works | metadata: License-Expression |
 
+## 可选依赖（OCR，SPEC §2）
+
+> 这些包**不在** `requirements.txt` 里，只有装了 `requirements-ocr.txt` 才进入运行时。
+> 不装也能跑：S6 走降级路径（`text=""` / `confidence=0` / `engine="none"` + WARN）。
+
+| 包 | 版本区间 | SPDX | 用途 | 判定依据 |
+|---|---|---|---|---|
+| paddleocr | >=3.7.0,<3.8.0 | Apache-2.0 | 主 OCR 引擎 | PyPI metadata `license: Apache License 2.0`（2026-10-21 核查） |
+| paddlepaddle | >=3.0.0 | Apache-2.0 | paddleocr 的推理基座 | PyPI metadata（PaddlePaddle 官方项目） |
+| pytesseract | >=0.3.13,<0.4 | Apache-2.0 | 降级 OCR 引擎（需系统 tesseract 二进制） | PyPI metadata |
+
 ## 红线（SPEC §2）
 
 - 禁止 GPL 依赖进入主分发：Potrace 一律不用。

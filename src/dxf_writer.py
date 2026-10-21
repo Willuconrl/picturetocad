@@ -433,7 +433,9 @@ class DXFWriter:
                     bulges=eff, closed=bool(closed))
 
     def add_text(self, text: str, insert, height: float,
-                 layer: str = "TEXT", rotation: float = 0.0) -> None:
+                 layer: str = "TEXT", rotation: float = 0.0,
+                 xdata: dict[str, object] | None = None) -> "Text":
+        """写 TEXT。`xdata` 以 XDATA（appid=R2V）挂溯源属性（line_id/engine/confidence）。"""
         self._require_layer(layer)
         p = self._to_cad(np.asarray(insert, dtype=np.float64).reshape(1, 2))[0]
         x, y = self._pt(p)
@@ -447,6 +449,14 @@ class DXFWriter:
         )
         self._entities_written += 1
         self._track("TEXT", ent, insert=(x, y), height=h, rotation=rot, text=str(text))
+        if xdata:
+            if "R2V" not in self.doc.appids:
+                self.doc.appids.add("R2V")
+            tags: list[tuple[int, object]] = []
+            for key, value in xdata.items():
+                tags.append((1000, f"{key}={value}"))
+            ent.set_xdata("R2V", tags)
+        return ent
 
     def add_mtext(self, text: str, insert, height: float,
                   layer: str = "TEXT", width: float | None = None) -> None:

@@ -270,6 +270,63 @@ def test_dxf_is_byte_identical(cfg: R2VConfig, registration, tmp_path: Path) -> 
     assert first_metrics == second_metrics
 
 
+def test_text_items_written_and_placeholders_skipped(cfg: R2VConfig, registration, tmp_path: Path) -> None:
+    """置信度达标的写 TEXT（带 XDATA 溯源），低于阈值只计数 + 灰框，不写实体。"""
+    image = _render(
+        lambda big, s: cv2.line(big, (int(60 * s), int(150 * s)), (int(340 * s), int(150 * s)), 0, int(4 * s))
+    )
+    s3, fit, layer = _stages(image, cfg)
+    items = [
+        {"line_id": "s6-line-0", "insertion_point": [8.0, 12.0], "text": "R2V",
+         "height_mm": 1.6, "confidence": 0.95, "is_placeholder": False},
+        {"line_id": "s6-line-1", "insertion_point": [8.0, 8.0], "text": "",
+         "height_mm": 1.6, "confidence": 0.0, "is_placeholder": True},
+    ]
+    result, metrics = run_s8_dxf(
+        fit, layer, s3.graph, registration, cfg,
+        dpi=DPI, image_size_px=(400, 300), out_dir=tmp_path, text_items=items,
+    )
+    assert result.self_check.text_written == 1
+    assert result.self_check.text_skipped_low_confidence == 1
+    assert metrics.counts["text_written"] == 1
+    assert metrics.counts["text_skipped_low_confidence"] == 1
+    assert metrics.details["text_confidence_min"] == cfg.text.ocr.text_confidence_min
+
+    doc = ezdxf.readfile(result.dxf_path)
+    texts = [e for e in doc.modelspace() if e.dxftype() == "TEXT"]
+    assert len(texts) == 1, f"应只写 1 个 TEXT，实际 {len(texts)}"
+    xdata = texts[0].get_xdata("R2V") if "R2V" in doc.appids else []
+    joined = " ".join(str(tag[1]) for tag in xdata)
+    assert "line_id=s6-line-0" in joined
+    assert "engine=" in joined and "confidence=0.950000" in joined
+    # 占位条目：灰色虚线框落到 debug 图
+    overlay = tmp_path / "debug" / "overlay_s8.png"
+    assert overlay.is_file(), "占位条目应产出 debug/overlay_s8.png"
+    assert cv2.imread(str(overlay)) is not None
+
+
+def test_text_items_without_engine_produce_no_entities(cfg: R2VConfig, registration, tmp_path: Path) -> None:
+    """引擎缺失（S6 全占位）：TEXT 实体数 = 0，掩膜数 = 行数。"""
+    image = _render(
+        lambda big, s: cv2.line(big, (int(60 * s), int(150 * s)), (int(340 * s), int(150 * s)), 0, int(4 * s))
+    )
+    s3, fit, layer = _stages(image, cfg)
+    items = [
+        {"line_id": f"s6-line-{i}", "insertion_point": [8.0 + i, 8.0], "text": "",
+         "height_mm": 1.6, "confidence": 0.0, "is_placeholder": True}
+        for i in range(2)
+    ]
+    result, metrics = run_s8_dxf(
+        fit, layer, s3.graph, registration, cfg,
+        dpi=DPI, image_size_px=(400, 300), out_dir=tmp_path, text_items=items,
+    )
+    doc = ezdxf.readfile(result.dxf_path)
+    assert [e for e in doc.modelspace() if e.dxftype() == "TEXT"] == []
+    assert result.self_check.text_written == 0
+    assert result.self_check.text_skipped_low_confidence == len(items)
+    assert metrics.counts["text_skipped_low_confidence"] == len(items)
+
+
 def test_empty_primitives_raises(cfg: R2VConfig, registration, tmp_path: Path) -> None:
     from src.s4_fit import FitResult
     from src.s5_layer import LayerResult

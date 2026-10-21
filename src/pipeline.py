@@ -19,7 +19,7 @@ from src.s2_binarize import S2Input, binarize_image
 from src.s3_skeleton import TopologyGraph, run_s3_skeleton
 from src.s4_fit import FitResult, S4Input, run_s4_fit
 from src.s5_layer import LayerResult, run_s5_layer
-from src.s6_text import run_s6_text
+from src.s6_text import collect_text_items, run_s6_text
 from src.s7_register import RegistrationResult, run_s7_register
 from src.s8_dxf import S8Result, run_s8_dxf
 
@@ -105,6 +105,10 @@ def run_pipeline(
     )
     metrics["s6"] = s6_metrics
     ocr_regions = tuple(candidate.bbox for candidate in s6.candidates)
+    text_items = collect_text_items(
+        s6.lines, mm_per_px=registration.scale,
+        confidence_min=float(cfg.text.ocr.text_confidence_min),
+    )
 
     dxf, s8_metrics = run_s8_dxf(
         fit,
@@ -116,6 +120,7 @@ def run_pipeline(
         image_size_px=page,
         out_dir=out,
         pending_ocr_regions=ocr_regions,
+        text_items=text_items,
     )
     metrics["s8"] = s8_metrics
 

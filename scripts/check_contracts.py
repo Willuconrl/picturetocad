@@ -532,6 +532,15 @@ def check_licenses(root: Path) -> None:
         if missing:
             err(check, f"LICENSES.md 缺少这些依赖（requirements.txt 里有）：{missing}")
 
+    # 可选依赖小节（OCR）：用户装 requirements-ocr.txt 前必须能查到许可证
+    if "可选依赖" not in text:
+        err(check, "LICENSES.md 缺少『可选依赖』小节（requirements-ocr.txt 里的包必须可查许可证）")
+    else:
+        optional = text.split("可选依赖", 1)[1]
+        for name in ("paddleocr", "paddlepaddle", "pytesseract"):
+            if name not in optional:
+                err(check, f"LICENSES.md 的『可选依赖』小节缺少 {name}")
+
     unknown = sorted(n for n, c in rows.items() if len(c) > 2 and c[2] == "UNKNOWN")
     confirm = text.split("待人工确认", 1)[1] if "待人工确认" in text else ""
     for name in unknown:
