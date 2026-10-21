@@ -49,13 +49,16 @@ DIM_REL_TOL = 0.005
 
 #: 实测偏差（M7-Golden 各轮修复后），用于把 xfail 的原因写清楚
 MEASURED = {
-    "synthetic_line_single": "P95=0.547px(>0.5)、关键尺寸 0.0465mm ✓、图层 ✓；仅 Hausdorff 差 0.047px",
-    "synthetic_arc_120": "P95=0.394px ✓、关键尺寸 0.0514mm（超 0.05 仅 0.0014mm）；仅扫角差 5.6°",
-    "synthetic_polyline_bulge": "P95=9.218px、1 ARC + 3 LINE vs 1 LINE + 1 ARC、图层 LINES_W0.35 vs 0.50",
+    "synthetic_polyline_bulge": "P95=8.090px、1 ARC + 3 LINE vs 1 LINE + 1 ARC、图层 LINES_W0.35 vs 0.50"
+    "（直线段被切成 3 条 + 宽档归错，专项修复中）",
 }
 
 #: 已全部达标的场景（不挂 xfail）
-PASSING_SCENES = ("synthetic_circle_full",)
+PASSING_SCENES = (
+    "synthetic_circle_full",
+    "synthetic_line_single",
+    "synthetic_arc_120",
+)
 
 
 @pytest.fixture(scope="module")

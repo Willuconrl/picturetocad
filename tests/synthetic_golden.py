@@ -156,6 +156,17 @@ class Scene:
         return w, h
 
     @property
+    def physical_size_mm(self) -> tuple[float, float]:
+        """**实际**物理尺寸 = 像素数 × 物理分辨率（用户决策 A）。
+
+        声明的 `width_mm/height_mm` 与像素栅格往往差 0.02–0.03 mm（30mm→354px=29.98mm），
+        而 golden 若用声明值、管线用实际像素高做 Y 翻转，就会引入
+        `声明值 − 实际值` 的系统性 y 偏置（实测 ≈0.55px）。这里统一到实际栅格。
+        """
+        w, h = self.pixel_size()
+        return w * self.mm_per_px, h * self.mm_per_px
+
+    @property
     def image_name(self) -> str:
         return f"synthetic_{self.name}.png"
 
@@ -227,11 +238,16 @@ def scene_chain_mm(spec: Spec, scene: Scene) -> np.ndarray:
 # 栅格化（mm → px，Y 翻转，1/16 px 定点）
 # ---------------------------------------------------------------------------
 def to_pixel_coords(points_mm: np.ndarray, scene: Scene) -> np.ndarray:
-    """CAD 系（左下原点、Y 上）→ 图像系（左上原点、Y 下）。"""
+    """CAD 系（左下原点、Y 上）→ 图像系（左上原点、Y 下）。
+
+    Y 翻转用**实际物理高度**（像素数 × mm/px），不用声明高度：管线是按像素高翻转的，
+    两边口径必须一致，否则会留下 `声明值 − 实际值` 的系统性 y 偏置。
+    """
     mpp = scene.mm_per_px
+    _, height_mm = scene.physical_size_mm
     out = np.empty_like(points_mm)
     out[:, 0] = points_mm[:, 0] / mpp
-    out[:, 1] = (scene.height_mm - points_mm[:, 1]) / mpp
+    out[:, 1] = (height_mm - points_mm[:, 1]) / mpp
     return out
 
 

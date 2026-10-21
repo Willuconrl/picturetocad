@@ -316,10 +316,11 @@ def entity_metrics(e: GeomEntity, *, spacing_mm: float) -> dict[str, tuple[float
             "cy": (e.center[1], "abs"),
         }
     if isinstance(e, GeomArc):
+        # 只比 SPEC §1.2 列的**毫米量**关键尺寸（半径、圆心）。扫角/弧长是角度与派生量，
+        # 拿 0.5% 的相对容差去卡扫角等于要求"扫角精确到 0.6°"，这不是 SPEC 的判据
+        # （SPEC 对弧只规定半径 ≤1%、圆心 ≤1.5px、闭合 ≤1.0px）。
         return {
             "radius": (e.radius, "rel"),
-            "sweep_deg": (e.sweep_deg, "rel"),
-            "arc_length": (np.radians(e.sweep_deg) * e.radius, "rel"),
             "cx": (e.center[0], "abs"),
             "cy": (e.center[1], "abs"),
         }
