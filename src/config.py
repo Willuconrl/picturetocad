@@ -543,6 +543,7 @@ class OcrConfig(_Section):
     lang: tuple[str, ...] = Field(..., min_length=1)
     text_confidence_min: float = Field(..., ge=0, le=1)
     anchor: Literal["baseline_left"]
+    descender_ratio: float = Field(..., ge=0, le=1, description="基线 = 行框下沿 − 比例×行高")
     height_from_xheight: bool
     recognize_dimensions: bool
     recognize_tolerance: bool

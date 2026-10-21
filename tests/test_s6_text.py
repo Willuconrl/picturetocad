@@ -162,8 +162,9 @@ def test_pending_ocr_lines_written(cfg: R2VConfig, tmp_path: Path) -> None:
     assert len(payload["lines"]) == len(result.lines)
     first = payload["lines"][0]
     assert set(first) == {
-        "id", "bbox", "member_region_ids", "char_count_estimate",
-        "baseline_angle", "height_mm", "length_mm",
+        "id", "bbox", "member_region_ids", "char_count_estimate", "baseline_angle",
+        "baseline_y_mm", "height_mm", "length_mm",
+        "text", "confidence", "engine", "is_placeholder",
     }
     # regions 文件必须保留（溯源依据）
     assert (tmp_path / "pending_ocr_regions.json").is_file()
@@ -193,6 +194,61 @@ def test_text_free_scenes_have_no_lines(cfg: R2VConfig, tmp_path: Path) -> None:
         )
         assert result.candidates == (), f"{name} 出现候选区"
         assert result.lines == (), f"{name} 出现虚假行"
+
+
+def test_baseline_y_mm_formula(cfg: R2VConfig, tmp_path: Path) -> None:
+    """基线 = 行框下沿 − descender_ratio × 行高（工程图标注的物理锚点）。"""
+    binary, fit, gray, linewidth = _line_scene(cfg)
+    result, _ = run_s6_text(
+        binary, fit, cfg, dpi=DPI, out_dir=tmp_path, gray=gray, linewidth_px=linewidth
+    )
+    line = result.lines[0]
+    x, y, w, h = line.bbox
+    expected_mm = (y + h - cfg.text.ocr.descender_ratio * h) * MM_PER_PX
+    assert line.baseline_y_mm == pytest.approx(expected_mm, abs=1e-3)
+    assert line.baseline_y_mm < line.height_mm + expected_mm  # 基线在行框内
+
+
+def test_ocr_degrades_without_engine(cfg: R2VConfig, tmp_path: Path) -> None:
+    """引擎缺失：不抛异常，字段齐全，WARN 带安装指引。"""
+    from src.ocr_engine import detect_engines
+
+    if detect_engines():
+        pytest.skip("本机装了 OCR 引擎，降级路径不适用")
+    binary, fit, gray, linewidth = _line_scene(cfg)
+    result, metrics = run_s6_text(
+        binary, fit, cfg, dpi=DPI, out_dir=tmp_path, gray=gray, linewidth_px=linewidth
+    )
+    for line in result.lines:
+        assert line.text == ""
+        assert line.confidence == 0.0
+        assert line.engine == "none"
+        assert line.is_placeholder is True
+    assert any("requirements-ocr.txt" in warning for warning in result.warnings)
+    assert metrics.counts["lines"] == len(result.lines)
+
+
+def test_text_items_structure(cfg: R2VConfig, tmp_path: Path) -> None:
+    """S8 的 text_items 入参结构（本轮不写 TEXT，只校验结构）。"""
+    from src.s6_text import collect_text_items
+
+    binary, fit, gray, linewidth = _line_scene(cfg)
+    result, _ = run_s6_text(
+        binary, fit, cfg, dpi=DPI, out_dir=tmp_path, gray=gray, linewidth_px=linewidth
+    )
+    items = collect_text_items(
+        result.lines, mm_per_px=MM_PER_PX,
+        confidence_min=cfg.text.ocr.text_confidence_min,
+    )
+    assert len(items) == len(result.lines)
+    first = items[0]
+    assert set(first) == {
+        "line_id", "insertion_point", "text", "height_mm", "confidence", "is_placeholder",
+    }
+    assert first["line_id"].startswith("s6-line-")
+    assert len(first["insertion_point"]) == 2
+    # 置信度 0 < 阈值 0.6 → 占位，S8 不应写 TEXT
+    assert first["is_placeholder"] is True
 
 
 def test_blank_image_has_no_candidates(cfg: R2VConfig, tmp_path: Path) -> None:

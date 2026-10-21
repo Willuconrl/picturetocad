@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict
 
 from src.artifacts import StageMetrics, write_json, write_metrics
 from src.config import R2VConfig
+from src.ocr_engine import recognize_lines
 from src.s4_fit import FitResult, Primitive
 
 
@@ -166,8 +167,24 @@ class TextLine(BaseModel):
     member_region_ids: tuple[int, ...]
     char_count_estimate: int
     baseline_angle: float          # 度，行基线与水平方向夹角
+    baseline_y_mm: float           # 基线（插入锚点）的 CAD 高度
     height_mm: float
     length_mm: float
+    text: str = ""
+    confidence: float = 0.0
+    engine: str = "none"
+    is_placeholder: bool = True
+
+
+def baseline_y_mm(bbox: tuple[int, int, int, int], *, descender_ratio: float, mm_per_px: float) -> float:
+    """基线高度（mm，CAD 系 Y 向上）= 行框下沿 − 下伸部比例 × 行高。
+
+    工程图里尺寸线/引线都指向**基线**，它才是文字标注的物理锚点；
+    行框左下角会随字高变化漂移，位置不稳定。
+    """
+    _x, y, _w, h = bbox
+    bottom_px = y + h
+    return round((bottom_px - descender_ratio * h) * mm_per_px, 4)
 
 
 def group_lines(
@@ -176,6 +193,7 @@ def group_lines(
     xheight_band_ratio: float,
     mm_per_px: float,
     gap_ratio: float = 1.2,
+    descender_ratio: float = 0.25,
 ) -> list[TextLine]:
     """把候选区按「同高度 + 同基线 + 水平间距 < 1.2×字高」合并成行。
 
@@ -252,6 +270,7 @@ def group_lines(
                 member_region_ids=tuple(c.id for c in group),
                 char_count_estimate=char_count,
                 baseline_angle=round(baseline, 4),
+                baseline_y_mm=baseline_y_mm(bbox, descender_ratio=descender_ratio, mm_per_px=mm_per_px),
                 height_mm=round(bbox[3] * mm_per_px, 4),
                 length_mm=round(bbox[2] * mm_per_px, 4),
             )
@@ -349,7 +368,32 @@ def run_s6_text(
         candidates,
         xheight_band_ratio=float(text_cfg.line_grouping.xheight_band_ratio),
         mm_per_px=mm_per_px,
+        descender_ratio=float(text_cfg.ocr.descender_ratio),
     )
+    # OCR：引擎缺失时逐行降级（text=""/confidence=0/engine="none"），不抛异常
+    source_image = gray if gray is not None else (mask * 255)
+    source_array = np.asarray(source_image)
+    if source_array.max() <= 1.0:
+        source_array = source_array * 255.0
+    crops: list[np.ndarray] = []
+    for line in lines:
+        x, y, w, h = line.bbox
+        crop = source_array[max(0, y): max(1, y + h), max(0, x): max(1, x + w)]
+        crops.append(crop.astype(np.uint8))
+    ocr_results, ocr_warnings = recognize_lines(crops)
+    warnings.extend(ocr_warnings)
+    if ocr_results:
+        refreshed: list[TextLine] = []
+        for line, ocr in zip(lines, ocr_results):
+            refreshed.append(
+                line.model_copy(update={
+                    "text": ocr.text,
+                    "confidence": ocr.confidence,
+                    "engine": ocr.engine,
+                    "is_placeholder": ocr.is_placeholder,
+                })
+            )
+        lines = refreshed
     if out_dir is not None:
         out = Path(out_dir)
         debug_dir = out / "debug"
@@ -465,6 +509,28 @@ def _write_debug(
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), canvas):
         raise S6Error(f"debug 叠加图写出失败：{path}")
+
+
+def collect_text_items(
+    lines: Sequence[TextLine], *, mm_per_px: float, confidence_min: float
+) -> list[dict[str, Any]]:
+    """S8 的 `text_items` 入参结构（本轮 S8 不写 TEXT，只校验结构）。
+
+    插入点 = **基线左端**（`ocr.anchor = baseline_left`）；置信度低于阈值时
+    `is_placeholder=True`，S8 只保留掩膜、不生成 TEXT 实体。
+    """
+    items: list[dict[str, Any]] = []
+    for line in lines:
+        x, _y, _w, _h = line.bbox
+        items.append({
+            "line_id": f"s6-line-{line.id}",
+            "insertion_point": [round(x * mm_per_px, 4), line.baseline_y_mm],
+            "text": line.text,
+            "height_mm": line.height_mm,
+            "confidence": line.confidence,
+            "is_placeholder": bool(line.confidence < confidence_min) or line.is_placeholder,
+        })
+    return items
 
 
 __all__ = [

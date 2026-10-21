@@ -219,6 +219,7 @@ text:
     lang: ["ch", "en"]
     text_confidence_min: 0.6           # 低于此值只出掩膜、不写 TEXT，避免编造
     anchor: "baseline_left"            # 定位取基线左端，禁止用外接矩形中心
+    descender_ratio: 0.25              # 基线 = 行框下沿 − 本比例 × 行高（下伸部占比）
     height_from_xheight: true          # 字高由像素 x-height × DPI 反推为 mm
     recognize_dimensions: false
     recognize_tolerance: false

@@ -1,0 +1,20 @@
+# requirements-ocr.txt
+# 可选 OCR 依赖（主依赖见 requirements.txt；不装也能跑，S6 会走降级路径）
+#
+# 版本核查（PyPI 元数据，2026-10-21）：
+#   paddleocr 3.7.0
+#     - 许可证：Apache License 2.0（与本项目兼容）
+#     - requires_python: >=3.8（classifier 明确列出 3.10/3.11/3.12/3.13）
+#     - 纯 Python wheel：paddleocr-3.7.0-py3-none-any.whl
+#     - 传递依赖：paddlex[ocr-core]>=3.7.0,<3.8.0 —— 因此上限必须锁在 <3.8.0，
+#       否则装到 paddlex 3.8 时 paddleocr 3.7 的接口假设不再成立
+#     - 另需 paddlepaddle 基座（CPU 版）：paddlepaddle>=3.0.0（不做上限，跟随官方）
+#   pytesseract 0.3.13（降级引擎）
+#     - 许可证：Apache-2.0
+#     - 需要系统装 tesseract 可执行文件；没有二进制时只会 import 成功、调用失败，
+#       所以引擎探测同时检查二进制是否存在
+#
+# 安装：pip install -r requirements-ocr.txt
+paddleocr>=3.7.0,<3.8.0
+paddlepaddle>=3.0.0
+pytesseract>=0.3.13,<0.4
