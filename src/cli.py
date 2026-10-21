@@ -50,6 +50,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="config.yaml 路径")
+    parser.add_argument(
+        "command", nargs="?", choices=["convert"], help="convert：端到端转换一张图（S0→S8）"
+    )
+    parser.add_argument("--image", default=None, help="convert 的输入图像路径")
+    parser.add_argument("--out", default=None, help="convert 的输出目录")
     parser.add_argument("--preset", default=None, help="套用哪个预设（缺省用 config 的 presets.default）")
     parser.add_argument("--presets", default=None, help="显式指定 presets.yaml 路径（默认按 config 解析）")
     parser.add_argument("--check-config", action="store_true", help="校验配置后退出")
@@ -106,9 +111,39 @@ def cmd_list_presets(config_path: Path, presets_path: str | None) -> int:
     return EXIT_OK
 
 
+def cmd_convert(effective: EffectiveConfig, image: str, out: str) -> int:
+    """端到端转换：S0→S8，产出 DXF 与各阶段 metrics。"""
+    from src.pipeline import pipeline_summary, run_pipeline
+
+    result = run_pipeline(image, effective.config, out_dir=Path(out))
+    summary = pipeline_summary(result)
+    print(json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True))
+    # OCR 尚未实现：显式告知，不写任何 TEXT 实体（编造文字比缺字更危险）
+    print("OCR skipped: pending implementation", file=sys.stderr)
+    if not result.dxf.self_check.passed:
+        print(
+            "ERROR DXF 自检未通过：" + "; ".join(result.dxf.self_check.problems[:3]),
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG_ERROR
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "convert":
+        if not args.image or not args.out:
+            parser.print_help()
+            return EXIT_CONFIG_ERROR
+        config_path = Path(args.config)
+        try:
+            effective = _load(config_path, args.preset, args.presets)
+        except (ConfigError, PresetError) as exc:
+            print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+        return cmd_convert(effective, args.image, args.out)
 
     if not (args.check_config or args.print_effective or args.list_presets):
         parser.print_help()

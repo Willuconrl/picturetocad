@@ -48,6 +48,9 @@ _SNAP_WARN_RATIO = 0.20
 #: 判定"正交方向"的角度容差（度）
 _AXIS_TOLERANCE_DEG = 5.0
 
+#: 按实体类型的图层（存在时才用）
+_TYPE_LAYER = {"arc": "ARCS", "circle": "CIRCLES"}
+
 
 class LayerError(ValueError):
     """S5 输入或参数非法。"""
@@ -500,6 +503,12 @@ def run_s5_layer(
             if "BORDER" not in configured_layers:
                 raise LayerError("dxf.layers 里没有 BORDER 图层")
             snapped = True
+            delta = width - widths_mm[primitive.id]
+        elif primitive.kind in ("arc", "circle") and _TYPE_LAYER[primitive.kind] in configured_layers:
+            # 圆弧/圆优先按**实体类型**分层（ARCS / CIRCLES）：这是工程图的通行做法，
+            # 也是 golden 与下游 CAM 期望的语义分层。宽度信息仍在 Assignment.width_mm 里。
+            layer = _TYPE_LAYER[primitive.kind]
+            snapped = bool(linewidth_cfg.snap_to_standard)
             delta = width - widths_mm[primitive.id]
         else:
             snapped = bool(linewidth_cfg.snap_to_standard)

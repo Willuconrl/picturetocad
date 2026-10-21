@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
@@ -28,6 +28,18 @@ from ezdxf.math import arc_angle_span_rad, bulge_to_arc
 from scipy.spatial import cKDTree
 
 MetricKind = Literal["rel", "abs"]
+
+#: 合成图 golden 收紧阈值（用户确认，M7-Golden）：SPEC 值的一半
+GOLDEN_HAUSDORFF_P95_PX = 0.5
+GOLDEN_KEY_DIMENSION_MM = 0.05
+
+#: 真实图沿用 SPEC §1.2 原值
+REAL_HAUSDORFF_P95_PX = 1.0
+REAL_KEY_DIMENSION_MM = 0.1
+
+
+class GoldenError(ValueError):
+    """golden 比对无法进行（文件缺失、读失败、空图）。"""
 
 #: 坐标比较时保留的有效位（避免 1e-16 级噪声进字典序）
 _SORT_DECIMALS = 9
@@ -344,17 +356,32 @@ class CompareResult:
     dims_ok: bool
     failed_checks: tuple[str, ...]
     passed: bool
+    # ④ 图层分布、⑤ 闭合标志（M7-Golden 新增，默认给安全值以兼容老调用）
+    layer_dist_ref: dict[str, int] = field(default_factory=dict)
+    layer_dist_cand: dict[str, int] = field(default_factory=dict)
+    layers_ok: bool = True
+    closed_flags_ref: tuple[tuple[str, bool], ...] = ()
+    closed_flags_cand: tuple[tuple[str, bool], ...] = ()
+    closed_ok: bool = True
+    count_mode: str = "entity"
 
     def to_json(self) -> dict[str, Any]:
         return {
             "entity_count_ref": self.entity_count_ref,
             "entity_count_cand": self.entity_count_cand,
             "entity_count_diff": self.entity_count_diff,
+            "count_mode": self.count_mode,
             "count_by_kind_ref": self.count_by_kind_ref,
             "count_by_kind_cand": self.count_by_kind_cand,
             "count_ok": self.count_ok,
             "hausdorff_p95_mm": round(self.hausdorff_p95_mm, 6),
             "hausdorff_ok": self.hausdorff_ok,
+            "layer_dist_ref": dict(sorted(self.layer_dist_ref.items())),
+            "layer_dist_cand": dict(sorted(self.layer_dist_cand.items())),
+            "layers_ok": self.layers_ok,
+            "closed_flags_ref": [list(item) for item in self.closed_flags_ref],
+            "closed_flags_cand": [list(item) for item in self.closed_flags_cand],
+            "closed_ok": self.closed_ok,
             "worst_rel_dim": None
             if self.worst_rel_dim is None
             else {
@@ -384,6 +411,40 @@ def _count_by_kind(entities: Sequence[GeomEntity]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+def atomic_counts(entities: Sequence[GeomEntity], *, spacing_mm: float) -> dict[str, int]:
+    """按**原子基元**计数：LWPOLYLINE 炸成若干 line/arc。
+
+    golden 把"直线+圆弧"打包成一条带 bulge 的多段线，管线输出两条独立基元。
+    直接比 DXF 实体个数等于拿"打包方式"当几何差异，所以计数维度按原子基元看。
+    """
+    out: dict[str, int] = {}
+    for e in entities:
+        if isinstance(e, GeomPolyline):
+            vertices = list(e.points)
+            pairs = list(zip(vertices, vertices[1:], e.bulges))
+            if e.closed and len(vertices) > 2:
+                pairs.append((vertices[-1], vertices[0], e.bulges[-1] if len(e.bulges) >= len(vertices) else 0.0))
+            for _start, _end, bulge in pairs:
+                kind = "ARC" if abs(float(bulge)) > 1e-9 else "LINE"
+                out[kind] = out.get(kind, 0) + 1
+        else:
+            out[e.kind] = out.get(e.kind, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _layer_distribution(entities: Sequence[GeomEntity]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for e in entities:
+        out[e.layer] = out.get(e.layer, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _closed_flags(entities: Sequence[GeomEntity]) -> tuple[tuple[str, bool], ...]:
+    """闭合标志的多重集：多段线参与，其他类型视为不闭合。"""
+    flags = [(e.kind, bool(e.closed)) for e in entities if isinstance(e, GeomPolyline)]
+    return tuple(sorted(flags))
+
+
 def compare_geometry(
     ref: Sequence[GeomEntity],
     cand: Sequence[GeomEntity],
@@ -393,8 +454,14 @@ def compare_geometry(
     max_entity_count_diff: int,
     dim_abs_tol_mm: float,
     dim_rel_tol: float,
+    check_layers: bool = True,
+    check_closed: bool = True,
+    count_mode: str = "atomic",
 ) -> CompareResult:
-    """三项比对。所有阈值都必须由调用方显式给出（来自 config.yaml 或测试）。"""
+    """五维比对。所有阈值都必须由调用方显式给出（来自 config.yaml 或测试）。
+
+    `count_mode`：`atomic`（默认，按原子基元计数）或 `entity`（按 DXF 实体计数）。
+    """
     if spacing_mm <= 0:
         raise ValueError(f"spacing_mm 必须 > 0，收到 {spacing_mm}")
     if max_entity_count_diff < 0:
@@ -405,8 +472,12 @@ def compare_geometry(
     failed: list[str] = []
     if len(ref) == 0:
         raise ValueError("参考（golden）实体列表为空：没有基准就无所谓比对，请先补 golden")
-    count_diff = len(cand) - len(ref)
-    count_ok = abs(count_diff) <= max_entity_count_diff
+    ref_counts = atomic_counts(ref, spacing_mm=spacing_mm) if count_mode == "atomic" else _count_by_kind(ref)
+    cand_counts = atomic_counts(cand, spacing_mm=spacing_mm) if count_mode == "atomic" else _count_by_kind(cand)
+    atomic_diff = sum(
+        abs(cand_counts.get(k, 0) - ref_counts.get(k, 0)) for k in set(ref_counts) | set(cand_counts)
+    )
+    count_ok = atomic_diff <= max_entity_count_diff
     if not count_ok:
         failed.append("ENTITY_COUNT")
 
@@ -470,12 +541,23 @@ def compare_geometry(
     if not dims_ok:
         failed.append("KEY_DIMS")
 
+    layer_ref = _layer_distribution(ref)
+    layer_cand = _layer_distribution(cand)
+    layers_ok = layer_ref == layer_cand
+    if check_layers and not layers_ok:
+        failed.append("LAYERS")
+    closed_ref = _closed_flags(ref)
+    closed_cand = _closed_flags(cand)
+    closed_ok = closed_ref == closed_cand
+    if check_closed and not closed_ok:
+        failed.append("CLOSED_FLAGS")
+
     return CompareResult(
         entity_count_ref=len(ref),
         entity_count_cand=len(cand),
-        entity_count_diff=count_diff,
-        count_by_kind_ref=_count_by_kind(ref),
-        count_by_kind_cand=_count_by_kind(cand),
+        entity_count_diff=int(len(cand) - len(ref)),
+        count_by_kind_ref=ref_counts,
+        count_by_kind_cand=cand_counts,
         count_ok=count_ok,
         hausdorff_p95_mm=haus,
         hausdorff_ok=haus_ok,
@@ -485,6 +567,13 @@ def compare_geometry(
         dims_ok=dims_ok,
         failed_checks=tuple(failed),
         passed=not failed,
+        layer_dist_ref=layer_ref,
+        layer_dist_cand=layer_cand,
+        layers_ok=layers_ok,
+        closed_flags_ref=closed_ref,
+        closed_flags_cand=closed_cand,
+        closed_ok=closed_ok,
+        count_mode=count_mode,
     )
 
 
@@ -498,6 +587,9 @@ def compare_dxf_files(
     max_entity_count_diff: int,
     dim_abs_tol_mm: float,
     dim_rel_tol: float,
+    check_layers: bool = True,
+    check_closed: bool = True,
+    count_mode: str = "atomic",
 ) -> CompareResult:
     """文件级入口：读两个 DXF 后比对。"""
     ref = read_dxf(ref_path, ignore_types=ignore_types)
@@ -510,17 +602,26 @@ def compare_dxf_files(
         max_entity_count_diff=max_entity_count_diff,
         dim_abs_tol_mm=dim_abs_tol_mm,
         dim_rel_tol=dim_rel_tol,
+        check_layers=check_layers,
+        check_closed=check_closed,
+        count_mode=count_mode,
     )
 
 
 __all__ = [
     "CompareResult",
     "DimDiff",
+    "GOLDEN_HAUSDORFF_P95_PX",
+    "GOLDEN_KEY_DIMENSION_MM",
     "GeomArc",
     "GeomCircle",
     "GeomEntity",
     "GeomLine",
     "GeomPolyline",
+    "GoldenError",
+    "REAL_HAUSDORFF_P95_PX",
+    "REAL_KEY_DIMENSION_MM",
+    "atomic_counts",
     "canonical_sort",
     "compare_dxf_files",
     "compare_geometry",

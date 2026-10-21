@@ -77,7 +77,11 @@ r2v --list-presets                            # 列出四套预设
   五条判据全部通过。
 - **M7-S8 完成**：`src/s8_dxf.py`（LINE/ARC/CIRCLE/LWPOLYLINE + 闭合环映射 + 回读自检 +
   未配准水印 + `metrics_s8.json`）；S3 的边新增 `closed_loop` 标注；S5 图框改按闭合边整体判定。
-- 后续：Golden 回归框架 → S6 OCR（见 `specs/SPEC.md` §4）。
+- **M7-Golden 完成（框架）**：`src/golden_compare.py` 扩到**五维**（Hausdorff P95 / 原子基元计数 /
+  关键尺寸 / 图层分布 / 闭合标志）、`scripts/golden_compare.py` CLI、`r2v convert` 子命令、
+  `src/pipeline.py`（S0→S8 单一实现）、`tests/test_golden_regression.py`（4 合成场景 + 反向用例）。
+  **4 个场景当前均未达标**（xfail，实测值见测试文件）——框架本身已验证能检出偏差。
+- 后续：修 4 个场景的偏差 → S6 OCR。
 
 ## 已知限制
 
