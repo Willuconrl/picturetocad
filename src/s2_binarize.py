@@ -38,6 +38,7 @@ from typing import Any, Literal
 
 import cv2
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 from scipy.spatial import cKDTree
 from skimage.morphology import skeletonize
 
@@ -57,6 +58,8 @@ def _to_u8(gray: np.ndarray) -> np.ndarray:
 
 #: 选优判据里的碎点面积上限（px²）。算法内部常数：只影响"什么算噪点"，不参与精度调参
 _SPECK_AREA_PX = 4
+#: 线宽统计时忽略的极小连通域（p90 在小样本上没有统计意义，M8-3）
+_MIN_AREA_FOR_WIDTH_PX = 50
 
 #: 漏墨惩罚的容差：AA 边缘的半亮像素允许落在掩膜外，超过这个比例才开始扣分
 _MISSED_TOLERANCE = 0.20
@@ -372,32 +375,48 @@ def _width_at(
 
 
 def _global_linewidth(binary: np.ndarray) -> float:
-    """全局线宽：各连通域宽度的中位数，单域宽度 = `面积 / max(骨架长, 主轴向长度)`。
+    """全局线宽：**逐连通域取 `2 × p90(EDT)`，再对各连通域取中位数**（M8-3）。
 
-    为什么是 max：
-    - 直笔画：骨架长 ≈ 主轴向长度，两者都等于笔画长度；`minAreaRect` 的短边会被
-      像素中心拟合成 (w−1)，实测 3px 笔画给 2.0（−33%），不能用；
-    - 曲笔画（圆/弧）：主轴向长度只有直径，必须让骨架长胜出，否则宽度会虚高 π 倍；
-    - 骨架偶发"双像素化"时长度偏大，主轴向长度正好把它压回去。
-    实测：3px→3.02、6px→6.03、10px→10.05（相对误差 ≤0.7%）。
+    为什么换掉 `area / max(骨架长, 主轴向长度)`：
+    - 形态学骨架在 ≥90° 折弯处会**切角**，骨架长被低估（实测弯折笔画 420 px vs 几何
+      504 px，−17%），于是"面积/骨架长"系统性高估（四场景 +4% ~ +18.5%）；
+    - `major_axis` 兜底从未生效（骨架长总是更大），属于死代码；
+    - EDT 是**纯局部几何量**，不经过骨架，折角处不会切角。
+
+    为什么是 p90：横截面上的 EDT 近似为 `0.5, 1.5, …, w/2`，中位数会被边缘低值拉到
+    `w/2`（实测 4.0 px vs 名义 6.0）；p90 在直线/弧/圆/折线四种几何上实测全部精确命中
+    6.000 px（见 `docs/m8-3_edt_poc.md`）。
+
+    为什么逐域再取中位：工程图常有多档线宽，整图统计会被面积最大的连通域主导；
+    逐域算再取中位，保留"多线宽图纸取主基线宽"的原有语义。
     """
     foreground = binary > 0
-    if int(foreground.sum()) == 0:
+    if not foreground.any():
         return 0.0
+    distance = distance_transform_edt(foreground)
     skeleton = skeletonize(foreground)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     widths: list[float] = []
     for index in range(1, count):
         component_area = int(stats[index, cv2.CC_STAT_AREA])
-        if component_area < _SPECK_AREA_PX:
+        # 小连通域的 p90 没有统计意义（噪声极大），与去噪阈值取更严者
+        if component_area < max(_SPECK_AREA_PX, _MIN_AREA_FOR_WIDTH_PX):
             continue
         mask = labels == index
+        values = distance[mask]
+        if values.size == 0:
+            continue
+        edt_width = 2.0 * float(np.percentile(values, 90))
         skeleton_length = int(skeleton[mask].sum())
-        ys, xs = np.nonzero(mask)
-        rect = cv2.minAreaRect(np.column_stack([xs, ys]).astype(np.float32))
-        major_axis = float(max(rect[1]))
-        length = max(float(skeleton_length), major_axis, 1.0)
-        widths.append(component_area / length)
+        if skeleton_length <= 0:
+            widths.append(edt_width)
+            continue
+        area_width = component_area / float(skeleton_length)
+        # 两个估计量的偏差**都只出现在偏高侧**：
+        # - `面积/骨架长` 因骨架切角而被抬高（弯折笔画 +4%~+18.5%）；
+        # - `2×p90(EDT)` 因掩膜量化而被抬高（3 px 笔画 → 4 px 掩膜 → 4.0）。
+        # 取二者较小值即可同时消掉两种高估：弯折场景 7.11→6.00，细笔画 4.0→3.02。
+        widths.append(min(edt_width, area_width))
     if not widths:
         return 0.0
     return float(np.median(np.asarray(widths, dtype=np.float64)))
