@@ -90,3 +90,30 @@ def test_single_edge_latency_under_red_line(bulge_points: np.ndarray) -> None:
     segment_curve(bulge_points, tolerance_px=1.77)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     assert elapsed_ms < 10.0, f"单边切分 {elapsed_ms:.2f} ms 超过 10 ms 红线"
+
+
+def test_perfect_arc_is_not_split() -> None:
+    """奥卡姆剃刀：完美圆弧必须原样返回 **1 个 ARC**，绝不能被切成 line+arc。"""
+    angles = np.linspace(0.0, np.deg2rad(120.0), 120)
+    points = np.column_stack([50.0 + 80.0 * np.cos(angles), 60.0 + 80.0 * np.sin(angles)])
+    segments = segment_curve(points, tolerance_px=1.77)
+    assert len(segments) == 1, f"完美圆弧被切成 {len(segments)} 段"
+    assert segments[0].kind == "circle"
+
+
+def test_perfect_line_is_not_split() -> None:
+    points = np.column_stack([np.linspace(0.0, 200.0, 200), np.full(200, 30.0)])
+    segments = segment_curve(points, tolerance_px=1.77)
+    assert len(segments) == 1 and segments[0].kind == "line"
+
+
+def test_adjacent_segments_share_bitwise_identical_endpoint(bulge_points: np.ndarray) -> None:
+    """相邻基元的连接点必须**逐位相等**（`==`，不允许近似相等）。"""
+    segments = segment_curve(bulge_points, tolerance_px=1.77)
+    assert len(segments) >= 2, f"bulge 边应切成多段，实际 {len(segments)}"
+    for previous, current in zip(segments, segments[1:]):
+        end = previous.points[-1]
+        start = current.points[0]
+        assert end[0] == start[0] and end[1] == start[1], (
+            f"连接点不相等：{end} vs {start}"
+        )

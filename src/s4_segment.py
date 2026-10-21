@@ -156,6 +156,36 @@ def _make_segment(points: np.ndarray, kind: str) -> object | None:
     return s4._Segment(points=points, model=model, kind="circle")  # noqa: SLF001
 
 
+def _rms_of(kind: str, model: object, points: np.ndarray) -> float:
+    if kind == "line":
+        residuals = (points - np.asarray(model.point)) @ np.asarray(model.normal)  # type: ignore[attr-defined]
+        return float(np.sqrt(np.mean(residuals**2)))
+    residuals = np.hypot(
+        points[:, 0] - model.center[0], points[:, 1] - model.center[1]  # type: ignore[attr-defined]
+    ) - model.radius  # type: ignore[attr-defined]
+    return float(np.sqrt(np.mean(residuals**2)))
+
+
+def single_model_guard(
+    points: np.ndarray, *, tolerance_px: float
+) -> tuple[str, object] | None:
+    """奥卡姆剃刀：**先试单模型**，达标就不再切分。
+
+    纯圆弧/纯直线若直接进双模型枚举，会因数值微扰让 `line+arc` 的 Cost 略低于
+    `single arc`，把一条完整圆弧切成"短直线 + 弧"（M8-4 集成时正是这样破坏了
+    `test_arc_radius_and_center` 与端点逐位相等）。单模型达标即返回，100% 杜绝误切。
+    """
+    if len(points) >= 2:
+        line = s4.fit_line(points)
+        if line is not None and _rms_of("line", line, points) <= tolerance_px:
+            return "line", line
+    if len(points) >= s4._MIN_CIRCLE_POINTS:  # noqa: SLF001
+        circle = s4.fit_circle(points)
+        if circle is not None and _rms_of("circle", circle, points) <= tolerance_px:
+            return "circle", circle
+    return None
+
+
 def segment_curve(
     points: np.ndarray,
     *,
@@ -164,17 +194,25 @@ def segment_curve(
     lam: float = DEFAULT_LAMBDA,
     depth: int = 0,
 ) -> list[object]:
-    """把一段中心线切成若干 LINE/ARC 基元（递归：某侧 RMS 超容差就继续切）。
+    """把一段中心线切成若干 LINE/ARC 基元。
 
-    `tolerance_px` 是**绝对**残差容差（由 `fitting.arc_residual_mm` 按 DPI 换算而来），
+    流程：**单模型拦截** → 双模型联合切分 → 递归（某侧仍超容差继续切）。
+    `tolerance_px` 是**绝对**残差容差（由 `fitting.arc_residual_mm` 按 DPI 换算），
     与线宽解耦。
     """
     if depth > 6 or len(points) < 2 * MIN_POINTS:
         return []
+    guard = single_model_guard(points, tolerance_px=tolerance_px)
+    if guard is not None:
+        kind, model = guard
+        return [s4._Segment(points=points, model=model, kind=kind)]  # noqa: SLF001
     split = best_split(points, lam=lam, tolerance_px=tolerance_px)
     if split is None:
         return []
-    left, right = points[: split.index], points[split.index:]
+    # 端点吸附：相邻两段共享**同一个浮点坐标**（points[k]），保证 bitwise equal
+    left = points[: split.index].copy()
+    left[-1] = points[split.index]
+    right = points[split.index:].copy()
     left_rms = math.sqrt(split.sse_left / max(len(left), 1))
     right_rms = math.sqrt(split.sse_right / max(len(right), 1))
     segments: list[object] = []
@@ -196,7 +234,6 @@ def segment_curve(
             segments.extend(deeper)
     if len(segments) > max_segments:
         return []
-    # 按原顺序拼接（左段在前）
     return segments
 
 
@@ -209,4 +246,5 @@ __all__ = [
     "SplitResult",
     "best_split",
     "segment_curve",
+    "single_model_guard",
 ]

@@ -108,3 +108,40 @@ Cost(k) = SSE(k) + λ · ln(n) · p(M1,M2)        # p(LINE)=2, p(ARC)=3
 2. `_make_segment` 的端点必须由相邻段共享（复用 S3 节点），保证逐位相等；
 3. `arc_residual_mm` + `arc_residual_factor` 废弃告警的配置迁移（本轮已写好补丁但随集成回滚）；
 4. 集成后再跑 golden：目标 bulge P95 ≤1.0 px、原子基元恰为 1 LINE + 1 ARC。
+
+## Phase 3：单模型拦截 + 端点吸附（模块内已验证，**集成仍未合入**）
+
+### 已实现并验证
+
+| 修复 | 实现 | 验证 |
+|---|---|---|
+| 纯弧/纯线被误切 | `single_model_guard`：先试单 LINE（RMS ≤ 容差 → 直接返回），再试单 ARC | `test_perfect_arc_is_not_split`（完美 120° 弧 → 恰 1 个 ARC）、`test_perfect_line_is_not_split` ✓ |
+| 端点不逐位相等 | 切分时令 `left[-1] = right[0] = points[k]`（同一浮点坐标） | `test_adjacent_segments_share_bitwise_identical_endpoint`（`==` 断言）✓ |
+| 性能 | 积分图直线 SSE + 粗到细（步长 10） | 单边 **4.89 ms** < 10 ms ✓ |
+
+模块级 7 个用例全绿，全量 `pytest` 仍 **340 passed, 1 xfailed**（集成回滚状态）。
+
+### 集成仍然失败的精确原因（比 Phase 2 的记录更细）
+
+再次把 `run_s4_fit` 接到 `segment_curve`（并把 `arc_residual_mm` 接上）后，失败面从 4 个
+**扩大到 8 个**，新增 `test_line_endpoint_and_length_accuracy[horizontal/diagonal]` 与
+两个 golden 场景。根因不是切分本身，而是**分段之后管线还做了一大串后处理**，
+而 `segment_curve` 给出的模型绕过了它们：
+
+| 后处理（`run_s4_fit` 内） | 作用 | 被绕过后的后果 |
+|---|---|---|
+| `_refit_circle` | 用中心线样本重算圆心/半径/rms | 圆弧半径 22.6906 ≠ 期望（`test_s8_dxf`） |
+| `_merge_same_kind` | 同模型相邻段合并 | 段数变化 → 端点/长度判据漂移 |
+| `_line_extent` | 自由端延伸到墨迹端帽 | 线段端点缩短 1–2 px → 端点判据失败 |
+| 节点吸附 `nodes[...]` | 交汇点吸到共享节点 | 端点不逐位相等 |
+| `_enforce_g1` | G1 连续性复检 | 切点处切向跳变未被修正 |
+
+也就是说：**"切分器"与"后处理链"必须一起换**，只换前者等于让后处理作用在语义不同的输入上。
+
+### M8-4 收口建议
+
+1. 把 `segment_curve` 的产物**转成旧 `_Segment` 语义**（`points` 必须是原折线的连续切片、
+   不含重复端点），再交给现有后处理链；
+2. 或用"适配层"：`segment_curve` 只决定 **切点索引**，模型仍由 `_refit_circle` /
+   `fit_line` + `_line_extent` / 节点吸附在 `run_s4_fit` 内完成（推荐，改动最小）。
+3. 集成后重跑：目标 bulge P95 ≤1.0 px、原子基元恰为 1 LINE + 1 ARC，且 8 个失败用例转绿。
