@@ -1,5 +1,10 @@
 # r2v-tool
 
+[![ci](https://github.com/OWNER/r2v-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/r2v-tool/actions/workflows/ci.yml)
+
+> 徽章 URL 需在首次推送到 GitHub 后，把 `OWNER` 换成实际账号/组织名（本仓库当前未推送，
+> 徽章不会亮起，这是预期状态）。
+
 光栅图纸 → CAD（DXF）矢量化工具。精度优先：宁可少输出，也不输出无法标注误差的东西。
 
 > **能力边界（硬性）**：输出是对输入图像的**几何近似**，不是对现实物体的测量还原。
@@ -82,6 +87,31 @@ S6 会输出 `text` / `confidence` / `engine` / `is_placeholder` 四个字段；
   （看 `metrics_s6.json` 的 `details.ocr_engine` 与 WARN）；④ 语言包是否覆盖
   （`text.ocr.lang` 默认 `["ch","en"]`）。
 - **绝不编造**：置信度不足时宁可缺字，也不写猜测内容——缺字可人工补，错字会污染下游。
+
+## CI 保证
+
+`.github/workflows/ci.yml` 在每次 push / PR 上跑以下步骤（`ubuntu-latest`）：
+
+| 步骤 | 命令 | 保证什么 |
+|---|---|---|
+| 依赖安装 | `pip install -r requirements.txt` | 锁定的 17 个版本可安装 |
+| wheel 校验 | `scripts/verify_wheels.py --check` | 锁定版本在 cp310-manylinux 与当前解释器都有 wheel |
+| 测试 | `pytest -q` | 333 passed + 1 xfailed 基线（`polyline_bulge` 为已知限制） |
+| 契约校验 | `scripts/check_contracts.py` | 配置/坐标契约/许可证清单/文档链接一致 |
+| 端到端冒烟 | `python -m src convert ...` | `drawing.dxf` 与 `metrics_s8.json` 真的能产出 |
+
+**matrix 只跑 3.10 与 3.12**：3.10 是验收基线（生产/交付），3.12 是开发组依赖（numpy 2.5.4 等）。
+**故意不跑 3.11**——它在 `requirements.txt` 里与 3.10 同属 `python_version < 3.12` 分组，
+覆盖率完全等价，加节点只是浪费算力；若将来依赖分组改成三段，再补 3.11。
+
+**CI 刻意不装 `requirements-ocr.txt`**：保证 S6 的降级路径（无引擎 → `text=""` /
+`confidence=0` / `engine="none"` + WARN）持续被覆盖。
+
+本地等效运行（脚本正确性本地验、解释器兼容性以 CI 为准）：
+
+```bash
+bash scripts/ci_local.sh        # 会先打印 Python 版本；非 3.10/3.12 时给出 Warning
+```
 
 ## 目录
 

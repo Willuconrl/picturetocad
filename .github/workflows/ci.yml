@@ -1,0 +1,60 @@
+name: ci
+
+# 触发：主分支推送 + 所有 PR
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 只跑 3.10 与 3.12：
+        # - 3.10 是验收基线（SPEC §1 / README「安装」段），必须绿；
+        # - 3.12 是开发组依赖（numpy 2.5.4 等），保证上限兼容；
+        # - **故意不跑 3.11**：requirements.txt 里 3.11 与 3.10 落在同一依赖分组
+        #   （`python_version < 3.12`），覆盖率与 3.10 完全等价，加节点只是浪费算力。
+        #   若将来依赖分组改成三段，再补 3.11 并同步更新本注释。
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # 刻意**不装** requirements-ocr.txt：保证 S6 的降级路径在 CI 上持续被覆盖
+      # （引擎缺失 → text="" / confidence=0 / engine="none" + WARN）。
+
+      - name: Verify pinned wheels
+        run: python scripts/verify_wheels.py --check
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check contracts
+        run: python scripts/check_contracts.py
+
+      - name: Smoke convert (end-to-end)
+        run: |
+          python -m src convert --image test_images/synthetic_line_single.png --out outputs/ci_smoke
+          test -f outputs/ci_smoke/drawing.dxf
+          test -f outputs/ci_smoke/metrics_s8.json
