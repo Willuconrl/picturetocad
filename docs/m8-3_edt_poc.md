@@ -73,3 +73,42 @@ linewidth = 2.0 * np.percentile(distance[foreground], 90)
 | synthetic_circle_full | 0.126 px | ✓ 全过 |
 
 全量 `pytest`：**336 passed, 1 xfailed**（含收紧到 1.05 的新锚点）。
+
+## EDT 改造净影响对照表（M8-2 `c2fde8a` vs M8-3 `894ffeb`）
+
+复现方式：
+
+```bash
+python scripts/measure_net_impact.py --out outputs/net_impact/m83.json
+git checkout c2fde8a -- src/s2_binarize.py          # 临时换回旧 S2
+python scripts/measure_net_impact.py --out outputs/net_impact/m82.json
+git checkout HEAD -- src/s2_binarize.py             # 换回新 S2
+```
+
+| 场景 | S2 线宽（旧→新） | S4 分段数 | golden P95（旧→新） | S5 图层 |
+|---|---|---|---|---|
+| synthetic_line_single | 6.019 → **6.000** | 1 | 0.127 → 0.219 px | `LINES_W0.50` |
+| synthetic_arc_120 | 7.012 → **6.000** | 1 | 0.425 → **0.302 px**（更好） | `ARCS` |
+| synthetic_circle_full | 6.724 → **6.000** | 1 | 0.126 → 0.126 px | `CIRCLES` |
+| synthetic_polyline_bulge | 7.109 → **6.000** | 2 | 9.919 → **10.975 px**（更差） | `ARCS` + `LINES_W0.35` |
+
+**结论（资产负债表）**
+
+- **S2 改对了**：四场景线宽全部收敛到 6.000 px（真值 5.913，误差 +1.5%），
+  旧法在弧/圆/折线上分别高估 +16.9% / +12.1% / +18.5%。
+- **收益**：`synthetic_arc_120` 的 P95 从 0.425 降到 0.302 px（唯一被线宽直接改善的场景）。
+- **代价**：`synthetic_line_single` P95 0.127 → 0.219 px（仍远低于 0.5 门槛，可接受）；
+  `synthetic_polyline_bulge` P95 9.919 → 10.975 px（**变差 10.6%**）。
+- **根因**：S4 的分段阈值 `arc_residual = arc_residual_factor × 线宽` 与线宽**隐式耦合**。
+  线宽从 7.11 修正到 6.00 后，容差同步收紧 16%，原本"凑巧"被接受的弧段被判为过糙，
+  分段结果偏移。这不是 S2 的缺陷，而是 S4 用旧（偏大）线宽调出来的经验阈值失效。
+
+## 已知限制（M8-3 收口）
+
+1. **bulge 场景 P95 = 10.975 px，未达标（判据 ≤0.5 px）**。原子基元为 1 ARC + 3 LINE，
+   期望 1 LINE + 1 ARC。根因是**切点判据未能识别弧↔直线过渡**：即使伪曲率已从 10.12×
+   压到 4.31×，仍高于真实过渡信号。
+2. **明确不做的事**：不为把 P95 拉回 9.9 而解耦 `arc_residual`。旧值是在错误线宽下
+   凑出来的巧合，维护它等于把错误固化。带着真实误差进入 M8-4，用正确模型真正解决。
+3. **M8-4 目标**：基于干净线重重构 S4 分段——双模型（直线 + 圆弧）联合 SSE + BIC 选择，
+   替换当前的"单模型拟合 → 超阈值再切"策略。
