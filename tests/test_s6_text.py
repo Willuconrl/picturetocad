@@ -131,6 +131,70 @@ def test_outputs_roundtrip(cfg: R2VConfig, tmp_path: Path) -> None:
     assert image is not None and image.shape[0] == binary.shape[0]
 
 
+def test_letters_are_grouped_into_one_line(cfg: R2VConfig, tmp_path: Path) -> None:
+    """R2V 三个字母必须合并成 **一行**，且行框紧密包裹三个字母。"""
+    binary, fit, gray, linewidth = _line_scene(cfg)
+    result, metrics = run_s6_text(
+        binary, fit, cfg, dpi=DPI, out_dir=tmp_path, gray=gray, linewidth_px=linewidth
+    )
+    assert len(result.candidates) == 3, f"应检出 3 个字母，实际 {len(result.candidates)}"
+    assert len(result.lines) == 1, f"应合并成 1 行，实际 {len(result.lines)} 行"
+    line = result.lines[0]
+    assert len(line.member_region_ids) == 3
+    # 行框应覆盖全部成员且不超出太多（紧密包裹）
+    xs = [c.bbox[0] for c in result.candidates]
+    xe = [c.bbox[0] + c.bbox[2] for c in result.candidates]
+    ys = [c.bbox[1] for c in result.candidates]
+    ye = [c.bbox[1] + c.bbox[3] for c in result.candidates]
+    assert line.bbox[0] == min(xs) and line.bbox[0] + line.bbox[2] == max(xe)
+    assert line.bbox[1] == min(ys) and line.bbox[1] + line.bbox[3] == max(ye)
+    assert abs(line.baseline_angle) <= 5.0, f"基线角 {line.baseline_angle}° 不合理"
+    assert line.char_count_estimate == 3
+    assert metrics.counts["lines"] == 1
+
+
+def test_pending_ocr_lines_written(cfg: R2VConfig, tmp_path: Path) -> None:
+    binary, fit, gray, linewidth = _line_scene(cfg)
+    result, _ = run_s6_text(
+        binary, fit, cfg, dpi=DPI, out_dir=tmp_path, gray=gray, linewidth_px=linewidth
+    )
+    payload = json.loads((tmp_path / "pending_ocr_lines.json").read_text(encoding="utf-8"))
+    assert len(payload["lines"]) == len(result.lines)
+    first = payload["lines"][0]
+    assert set(first) == {
+        "id", "bbox", "member_region_ids", "char_count_estimate",
+        "baseline_angle", "height_mm", "length_mm",
+    }
+    # regions 文件必须保留（溯源依据）
+    assert (tmp_path / "pending_ocr_regions.json").is_file()
+
+
+def test_text_free_scenes_have_no_lines(cfg: R2VConfig, tmp_path: Path) -> None:
+    """没有文字的合成场景：既不能有候选区，也不能有虚假行。"""
+    from src.s4_fit import FitResult
+
+    empty_fit = FitResult(
+        primitives=(), nodes={}, discarded_short_edges=0, warnings=(), counts_by_kind={}
+    )
+    for name in ("synthetic_line_single", "synthetic_arc_120", "synthetic_circle_full"):
+        image = ROOT / "test_images" / f"{name}.png"
+        from src.s2_binarize import S2Input, binarize_image
+
+        gray = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
+        s2, _ = binarize_image(S2Input.from_array(gray.astype(np.float32) / 255.0, dpi=DPI), cfg)
+        s3, _ = run_s3_skeleton(s2.binary, cfg, dpi=DPI, linewidth_px=s2.linewidth_px)
+        fit, _ = run_s4_fit(
+            S4Input(graph=s3.graph, contours=s2.edges.contours, linewidth_px=s2.linewidth_px, dpi=DPI),
+            cfg,
+        )
+        result, _ = run_s6_text(
+            s2.binary, fit, cfg, dpi=DPI, out_dir=tmp_path / name,
+            gray=gray, linewidth_px=s2.linewidth_px,
+        )
+        assert result.candidates == (), f"{name} 出现候选区"
+        assert result.lines == (), f"{name} 出现虚假行"
+
+
 def test_blank_image_has_no_candidates(cfg: R2VConfig, tmp_path: Path) -> None:
     """没有基元也没有文字：候选区必须为空，不能凭空造字。"""
     from src.s4_fit import FitResult

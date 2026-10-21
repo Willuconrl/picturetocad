@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,7 @@ class S6Result(BaseModel):
 
     candidates: tuple[TextCandidate, ...]
     excluded: tuple[ExcludedRegion, ...]
+    lines: tuple[TextLine, ...]
     debug_path: str | None
     counts: dict[str, int]
     warnings: tuple[str, ...]
@@ -74,6 +76,7 @@ class S6Result(BaseModel):
         return {
             "candidates": [c.model_dump(mode="json") for c in self.candidates],
             "excluded": [e.model_dump(mode="json") for e in self.excluded],
+            "lines": [line.model_dump(mode="json") for line in self.lines],
             "counts": dict(sorted(self.counts.items())),
             "debug_path": self.debug_path,
             "warnings": list(self.warnings),
@@ -153,6 +156,107 @@ def structural_primitives(
         if primitive.length_px >= threshold:
             structural.append(primitive)
     return structural
+
+
+class TextLine(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: int
+    bbox: tuple[int, int, int, int]
+    member_region_ids: tuple[int, ...]
+    char_count_estimate: int
+    baseline_angle: float          # 度，行基线与水平方向夹角
+    height_mm: float
+    length_mm: float
+
+
+def group_lines(
+    candidates: Sequence[TextCandidate],
+    *,
+    xheight_band_ratio: float,
+    mm_per_px: float,
+    gap_ratio: float = 1.2,
+) -> list[TextLine]:
+    """把候选区按「同高度 + 同基线 + 水平间距 < 1.2×字高」合并成行。
+
+    工程图文字以行/词组为语义单元：单字母送 OCR 会丢上下文（"H2O" 会被拆成三条），
+    也成倍增加引擎调用次数。合并后行还可作为候选区质量的二次校验
+    （宽高比异常大 / 高度方差过大 ⇒ 上游连通域筛选有问题）。
+    """
+    if not candidates:
+        return []
+    items = sorted(candidates, key=lambda c: (c.bbox[1], c.bbox[0]))
+    remaining = list(items)
+    lines: list[list[TextCandidate]] = []
+    while remaining:
+        seed = remaining.pop(0)
+        group = [seed]
+        changed = True
+        while changed:
+            changed = False
+            heights = [c.bbox[3] for c in group]
+            mean_height = float(np.mean(heights)) or 1.0
+            for candidate in list(remaining):
+                # 高度相近（x-height 带宽比）
+                if max(candidate.bbox[3], max(heights)) > xheight_band_ratio * min(
+                    candidate.bbox[3], min(heights)
+                ):
+                    continue
+                # 垂直中心落在同一带内
+                cy_group = float(np.mean([c.bbox[1] + c.bbox[3] / 2.0 for c in group]))
+                cy_candidate = candidate.bbox[1] + candidate.bbox[3] / 2.0
+                if abs(cy_candidate - cy_group) > 0.6 * mean_height:
+                    continue
+                # 水平间隙 < gap_ratio × 字高
+                left = min(c.bbox[0] for c in group)
+                right = max(c.bbox[0] + c.bbox[2] for c in group)
+                gap = max(
+                    left - (candidate.bbox[0] + candidate.bbox[2]),
+                    candidate.bbox[0] - right,
+                    0,
+                )
+                if gap > gap_ratio * mean_height:
+                    continue
+                group.append(candidate)
+                remaining.remove(candidate)
+                changed = True
+        lines.append(group)
+
+    out: list[TextLine] = []
+    for index, group in enumerate(sorted(lines, key=lambda g: (min(c.bbox[1] for c in g), min(c.bbox[0] for c in g)))):
+        xs = [c.bbox[0] for c in group]
+        ys = [c.bbox[1] for c in group]
+        xe = [c.bbox[0] + c.bbox[2] for c in group]
+        ye = [c.bbox[1] + c.bbox[3] for c in group]
+        bbox = (min(xs), min(ys), max(xe) - min(xs), max(ye) - min(ys))
+        # 字符数估计：逐成员按"宽/高"折算（宽高比≈1 算 1 个字符，宽的字算 2 个），
+        # 比"行宽 ÷ 中位字宽"稳——后者会把字间空白也算成字符（实测 3 个字估成 5 个）
+        char_count = int(sum(
+            max(1, int(round(c.bbox[2] / max(float(c.bbox[3]), 1.0)))) for c in group
+        ))
+        # 基线角：成员中心的线性拟合斜率
+        if len(group) >= 2:
+            cx = np.asarray([c.bbox[0] + c.bbox[2] / 2.0 for c in group], dtype=np.float64)
+            cy = np.asarray([c.bbox[1] + c.bbox[3] / 2.0 for c in group], dtype=np.float64)
+            if float(np.ptp(cx)) > 1e-6:
+                slope = float(np.polyfit(cx, cy, 1)[0])
+                baseline = math.degrees(math.atan(slope))
+            else:
+                baseline = 0.0
+        else:
+            baseline = 0.0
+        out.append(
+            TextLine(
+                id=index,
+                bbox=bbox,
+                member_region_ids=tuple(c.id for c in group),
+                char_count_estimate=char_count,
+                baseline_angle=round(baseline, 4),
+                height_mm=round(bbox[3] * mm_per_px, 4),
+                length_mm=round(bbox[2] * mm_per_px, 4),
+            )
+        )
+    return out
 
 
 def run_s6_text(
@@ -241,21 +345,29 @@ def run_s6_text(
         )
 
     debug_path: str | None = None
+    lines = group_lines(
+        candidates,
+        xheight_band_ratio=float(text_cfg.line_grouping.xheight_band_ratio),
+        mm_per_px=mm_per_px,
+    )
     if out_dir is not None:
         out = Path(out_dir)
         debug_dir = out / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
         debug_path = str(debug_dir / "overlay_s6.png")
-        _write_debug(debug_path, mask, primitive_mask, gray, candidates, excluded)
+        _write_debug(debug_path, mask, primitive_mask, gray, candidates, excluded, lines)
 
     counts = {
         "candidates": len(candidates),
         "excluded": len(excluded),
+        "lines": len(lines),
+        "char_count_estimate": sum(line.char_count_estimate for line in lines),
         "components": len(candidates) + len(excluded),
     }
     result = S6Result(
         candidates=tuple(candidates),
         excluded=tuple(excluded),
+        lines=tuple(lines),
         debug_path=debug_path,
         counts=counts,
         warnings=tuple(warnings),
@@ -284,8 +396,32 @@ def run_s6_text(
     if out_dir is not None:
         out = Path(out_dir)
         write_json(out / "pending_ocr_regions.json", result.to_json())
+        # 行级产物单独落盘（保留 regions 作为溯源依据，不因合并而删除）
+        write_json(out / "pending_ocr_lines.json", {
+            "lines": [line.model_dump(mode="json") for line in result.lines],
+            "counts": {"lines": len(result.lines),
+                       "char_count_estimate": sum(l.char_count_estimate for l in result.lines)},
+        })
         write_metrics(out, metrics)
     return result, metrics
+
+
+def _dashed_line(canvas: np.ndarray, p1: tuple[int, int], p2: tuple[int, int], color: tuple[int, int, int]) -> None:
+    """虚线（OpenCV 没有 dashed 参数，按 6px 画 4px 空手动切段）。"""
+    x1, y1 = p1
+    x2, y2 = p2
+    length = float(np.hypot(x2 - x1, y2 - y1))
+    if length < 1.0:
+        return
+    steps = int(length // 10) + 1
+    for step in range(steps):
+        t0 = step * 10.0 / length
+        t1 = min((step * 10.0 + 6.0) / length, 1.0)
+        if t0 >= 1.0:
+            break
+        a = (int(x1 + (x2 - x1) * t0), int(y1 + (y2 - y1) * t0))
+        b = (int(x1 + (x2 - x1) * t1), int(y1 + (y2 - y1) * t1))
+        cv2.line(canvas, a, b, color, 1, cv2.LINE_AA)
 
 
 def _write_debug(
@@ -295,8 +431,9 @@ def _write_debug(
     gray: np.ndarray | None,
     candidates: Sequence[TextCandidate],
     excluded: Sequence[ExcludedRegion],
+    lines: Sequence[TextLine] = (),
 ) -> None:
-    """原图灰底 + 红色半透明基元 + 绿色候选框 + 蓝色被排除连通域。"""
+    """原图灰底 + 红色半透明图线 + 绿色候选框 + 蓝色被排除连通域 + 黄色行框（虚线连成员）。"""
     if gray is not None:
         base = np.asarray(gray)
         if base.max() <= 1.0:
@@ -315,6 +452,16 @@ def _write_debug(
         cv2.rectangle(canvas, (x, y), (x + w, y + h), (255, 128, 0), 1)
         cv2.putText(canvas, item.reason[:12], (x, max(8, y - 2)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 128, 0), 1, cv2.LINE_AA)
+    # 行框（黄）+ 虚线连接同组成员
+    by_id = {candidate.id: candidate for candidate in candidates}
+    for line in lines:
+        x, y, w, h = line.bbox
+        cv2.rectangle(canvas, (x, y), (x + w, y + h), (0, 255, 255), 2)
+        members = [by_id[rid] for rid in line.member_region_ids if rid in by_id]
+        for first, second in zip(members, members[1:]):
+            p1 = (first.bbox[0] + first.bbox[2] // 2, first.bbox[1] + first.bbox[3] // 2)
+            p2 = (second.bbox[0] + second.bbox[2] // 2, second.bbox[1] + second.bbox[3] // 2)
+            _dashed_line(canvas, p1, p2, (0, 255, 255))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), canvas):
         raise S6Error(f"debug 叠加图写出失败：{path}")
