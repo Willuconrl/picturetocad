@@ -70,7 +70,7 @@ preprocess:
     nlmeans_patch_px: 5
     nlmeans_search_px: 21
     edge_preserve: true           # 开启时在强梯度处降低权重
-  invert_auto: true               # 前景占比 < invert_foreground_ratio 且均值>128 则反转
+  invert_auto: true               # 前景占比<0.15 且 均值<0.5 → 判定为负片并反转；正片图纸通常前景占比>0.15 或均值>0.5
   invert_foreground_ratio: 0.15
   clip_border_px: 0               # 扫描仪黑边/装订边裁切宽度（px），0=自动检测
   upsample_if_thin:               # 线条 <2px 时先超采样再处理（关键！否则骨架必偏）

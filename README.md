@@ -65,7 +65,9 @@ r2v --list-presets                            # 列出四套预设
 - **M2 完成**：`src/s1_preprocess.py`（BT.709 灰度/黑边裁切/反白/背景平坦化/去噪/超采样 +
   `metrics_s1.json`）；S0 补充 JPEG 块效应与半调网点检测、`skew_correction_applied` 字段；
   锐度阈值收紧到 0.8；许可证改为「metadata → 包内 LICENSE 文件」两级判定。
-- 后续：S2 二值化 + 亚像素边缘 → S3 骨架拓扑 → … → S8 组装（见 `specs/SPEC.md` §4）。
+- **M3 完成**：`src/s2_binarize.py`（四路二值化 + foreground_stability 选优 + 形态学清理 +
+  沿法线的 50% 电平亚像素边缘 + 逐点线宽 + `metrics_s2.json`）。
+- 后续：S3 骨架化与拓扑重建 → S4 几何拟合 → … → S8 组装（见 `specs/SPEC.md` §4）。
 
 ## 已知限制
 
@@ -74,6 +76,10 @@ r2v --list-presets                            # 列出四套预设
 - **莫尔纹**用「小圆点连通域密度」判定（干净线条图 0–0.4 / 1e4px²，6px 网点图 279），
   对极细网点（<2px）可能漏检。
 - S0 的 `perspective` 与 `stain_mask` 仍未实现，报告里以 `not_evaluated` 明示。
+- **S2 亚像素边缘**在"完美抗锯齿阶跃"上存在 ≤1/12 px 的固有偏置（50% 电平判据 + 双线性
+  重建的几何后果），实测 ≤0.09 px；真实扫描（边缘本身模糊）上 ≤0.05 px。
+- **S2 局部阈值**（sauvola/niblack）在笔画边缘会系统性多判 1 列像素，选优环节用"同分取紧"
+  规则压制；`break_touching_text` 与 `steger` 中心线尚未实现，会在 `warnings` 里明示。
 
 ## TODO
 
