@@ -523,6 +523,9 @@ class LinewidthConfig(_Section):
 class TextSeparationConfig(_Section):
     area_max_mm2: float = Field(..., gt=0)
     aspect_ratio_max: float = Field(..., gt=1)
+    min_area_px: int = Field(..., ge=1, description="S6 候选区最小连通域面积（px²）")
+    dilate_linewidth_factor: float = Field(..., ge=0, description="基元膨胀半径 = 线宽×本系数")
+    dilate_extra_px: float = Field(..., ge=0, description="基元膨胀的额外像素")
     stroke_width_cv_max: float = Field(..., ge=0, le=1)
     distance_to_skeleton_mm: float = Field(..., ge=0)
 

@@ -203,6 +203,9 @@ text:
   separation:                          # 文字/线条分离判据（需同时满足才判为文字）
     area_max_mm2: 50
     aspect_ratio_max: 8.0
+    min_area_px: 20                    # 小于此面积的连通域当噪点丢弃（S6 候选区筛选）
+    dilate_linewidth_factor: 0.5       # 基元膨胀半径 = 线宽 × 本系数 + dilate_extra_px
+    dilate_extra_px: 2
     stroke_width_cv_max: 0.25          # 笔画宽度变异系数：文字窄，线条长而均匀
     distance_to_skeleton_mm: 0.5
   line_grouping:

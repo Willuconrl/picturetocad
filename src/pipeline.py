@@ -19,6 +19,7 @@ from src.s2_binarize import S2Input, binarize_image
 from src.s3_skeleton import TopologyGraph, run_s3_skeleton
 from src.s4_fit import FitResult, S4Input, run_s4_fit
 from src.s5_layer import LayerResult, run_s5_layer
+from src.s6_text import run_s6_text
 from src.s7_register import RegistrationResult, run_s7_register
 from src.s8_dxf import S8Result, run_s8_dxf
 
@@ -92,6 +93,19 @@ def run_pipeline(
     )
     metrics["s5"] = s5_metrics
 
+    # S6 首轮：只提取文字候选区（不接 OCR），候选区回填给 S8 的 pending_ocr_regions
+    s6, s6_metrics = run_s6_text(
+        s2.binary,
+        fit,
+        cfg,
+        dpi=pre.dpi,
+        out_dir=out,
+        gray=pre.image,
+        linewidth_px=s2.linewidth_px,
+    )
+    metrics["s6"] = s6_metrics
+    ocr_regions = tuple(candidate.bbox for candidate in s6.candidates)
+
     dxf, s8_metrics = run_s8_dxf(
         fit,
         layers,
@@ -101,7 +115,7 @@ def run_pipeline(
         dpi=pre.dpi,
         image_size_px=page,
         out_dir=out,
-        pending_ocr_regions=pending_ocr_regions,
+        pending_ocr_regions=ocr_regions,
     )
     metrics["s8"] = s8_metrics
 

@@ -81,7 +81,12 @@ r2v --list-presets                            # 列出四套预设
   关键尺寸 / 图层分布 / 闭合标志）、`scripts/golden_compare.py` CLI、`r2v convert` 子命令、
   `src/pipeline.py`（S0→S8 单一实现）、`tests/test_golden_regression.py`（4 合成场景 + 反向用例）。
   **4 个场景当前均未达标**（xfail，实测值见测试文件）——框架本身已验证能检出偏差。
-- 后续：修 4 个场景的偏差 → S6 OCR。
+- **M7 收口（3/4 绿 + 已知限制）**：`src/s8_dxf.py`、`src/golden_compare.py`（五维）、
+  `scripts/golden_compare.py`、`r2v convert`、`src/pipeline.py`；line/circle/arc 三场景
+  五维判据全过，`polyline_bulge` 见「已知限制」。
+- **S6 首轮**：`src/s6_text.py` —— 文字候选区提取（结构性基元扣除 + 连通域筛选），
+  产出 `pending_ocr_regions.json` 与 `debug/overlay_s6.png`；**未接任何 OCR 引擎**。
+- 后续：S6 OCR 引擎接入 → M8（bulge 过渡区根治 + 架构优化）。
 
 ## 已知限制
 
@@ -101,6 +106,16 @@ r2v --list-presets                            # 列出四套预设
 - **闭合多边形（图框）的处理**：S3 把闭合环标成 `closed_loop`，S4 整条输出一条闭合多段线，
   S5 按整条边取外接框判图框，S8 写成单条 `closed=True` 的 LWPOLYLINE。代价是闭合多边形内部
   不再拆成独立 LINE/ARC——图框这类对象本来就应该保持闭合语义。
+- **`synthetic_polyline_bulge` 未达标（P95 = 8.09 px）**：一条「弧 + 直线」的边被 S4 切成
+  253 px（判成直线，rms 3.12 px → 回退多段线）+ 229 px 弧（真值 273 + 213）。两次切点判据
+  尝试均失败：① 枚举切点 + 最小总 SSE → 直线侧被判成巨弧（P95 94.5 px）；
+  ② 离散曲率突变点（阈值 0.5/线宽）→ 阈值对应的半径仅 ~14 px，对 r=148 px 的合法弧
+  永不触发（P95 96.5 px）。**根因上移到上游**：S4 轨配对在弧↔直线过渡区产生伪曲率
+  （两侧半宽不同 → 中心线局部弯折 ~1 px），任何基于中心线导数的判据都会被扰动。
+  M8 修复方向：S2 过渡区掩膜形态学闭合 + S4 轨配对加权平滑。
+- **S6 目前只提候选区**：字符笔画会被 S3/S4 拟合成短基元，因此 S6 用「结构性基元」
+  （长度 > max(10×线宽, 4×最小字高)）做扣除，短笔画不扣。根治办法是在 S4 之前做
+  文字/线条分离（M8）。
 
 ## TODO
 
