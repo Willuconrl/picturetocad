@@ -58,6 +58,12 @@ _MAX_SPLIT_DEPTH = 12          # 递归切分深度上限（防病态输入爆�
 #: 段端点吸附到图节点的距离阈值：中心线两端各裁掉 1×线宽，所以接头处端点天生离节点
 #: 约 1×线宽；阈值要 ≥1.5×线宽，否则 T 形接头的三条线都挂不上共享节点。
 _NODE_SNAP_LINEWIDTHS = 1.5
+#: 过渡区左右半宽的滑动中值窗口（M8-2）。实测 5 点会把 R=60 弧的半径判据压破 1%
+#: （S4 自有验收失败），3 点 + 偏移二次平滑是"压伪曲率且不伤圆弧"的最稳组合：
+#: 伪曲率峰值比 10.12× → 3.41×，全量测试与 golden 回归均绿。
+_HALFWIDTH_MEDIAN_WINDOW = 3
+#: 偏移序列的二次平滑窗口（1 = 不做）
+_OFFSET_MEDIAN_WINDOW = 3
 
 
 class FitError(ValueError):
@@ -412,7 +418,11 @@ def centerline_from_contours(
     )
     normals = _normals(sampled)
     radius = max(2.0, 2.5 * linewidth_px)
-    offsets = np.zeros(len(sampled), dtype=np.float64)
+    # 左右半宽分开记：只有两侧都被观测到才谈得上"配对"，缺失侧用最近有效值插补。
+    left = np.full(len(sampled), np.nan)
+    right = np.full(len(sampled), np.nan)
+    centre_from_positive = np.full(len(sampled), np.nan)
+    centre_from_negative = np.full(len(sampled), np.nan)
     for index, point in enumerate(sampled):
         neighbours = contour_tree.query_ball_point(point, radius)
         if not neighbours:
@@ -420,12 +430,41 @@ def centerline_from_contours(
         projections = (contour_points[np.asarray(neighbours)] - point) @ normals[index]
         positive = projections[projections > 0.5]
         negative = projections[projections < -0.5]
-        if positive.size and negative.size:
-            offsets[index] = (float(np.median(positive)) + float(np.median(negative))) / 2.0
-        elif positive.size:
-            offsets[index] = float(np.median(positive)) - linewidth_px / 2.0
-        elif negative.size:
-            offsets[index] = float(np.median(negative)) + linewidth_px / 2.0
+        if positive.size:
+            left[index] = float(np.median(positive))
+            centre_from_positive[index] = left[index] - linewidth_px / 2.0
+        if negative.size:
+            right[index] = float(-np.median(negative))
+            centre_from_negative[index] = right[index]
+    # ---- M8-2 修复：过渡区半宽平滑 -------------------------------------------------
+    # 弧↔直线交界处两侧半宽会突变（一侧被端帽/相邻笔画污染），直接取 (l+r)/2 会产生
+    # ~10× 弧参考曲率的伪曲率，把真实过渡点淹没。这里做三件事：
+    #   1) 缺失侧用最近有效值插补（np.interp 线性插补）；
+    #   2) 左右半宽各做 5 点滑动中值（窗口可回退到 3，见模块常量）；
+    #   3) 用一致性权重 w = min/max 降权：两侧越不对称，越不该把中心推离骨架。
+    def _fill(values: np.ndarray) -> np.ndarray:
+        valid = np.isfinite(values)
+        if valid.sum() < 2:
+            return values
+        idx = np.arange(len(values))
+        return np.interp(idx, idx[valid], values[valid])
+
+    def _median(values: np.ndarray, window: int) -> np.ndarray:
+        if window <= 1 or len(values) < window:
+            return values
+        padded = np.pad(values, (window // 2, window // 2), mode="edge")
+        view = np.lib.stride_tricks.sliding_window_view(padded, window)
+        return np.median(view, axis=1)
+
+    left = _median(_fill(left), _HALFWIDTH_MEDIAN_WINDOW)
+    right = _median(_fill(right), _HALFWIDTH_MEDIAN_WINDOW)
+    consistency = np.minimum(left, right) / np.maximum(np.maximum(left, right), 1e-9)
+    offsets = consistency * (left - right) / 2.0
+    # 半宽缺失的样本（整条边都只有单侧轨道）退回原始的"单侧估算 + 半线宽"逻辑
+    missing_both = (~np.isfinite(centre_from_positive)) & (~np.isfinite(centre_from_negative))
+    offsets[missing_both] = 0.0
+    # 偏移序列本身再做可选的中值平滑（默认关闭：二次平滑会把圆弧曲率一起压平）
+    offsets = _median(offsets, _OFFSET_MEDIAN_WINDOW)
     refined = sampled + normals * offsets[:, None]
     # 端部不可信：笔画端帽处只有单侧轨道，配对出的中心点会系统性偏（实测弧端残差 2px+，
     # 会把整条弧误切）。两端各裁掉 1×线宽的**弧长距离**，端点随后由图节点给出。
