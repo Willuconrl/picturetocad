@@ -958,7 +958,10 @@ def _line_extent(
     """把线段两端延伸到笔画端帽（骨架端点通常比笔迹端点缩进 0.5–2 px）。
 
     做法：取**走廊内**（到直线距离 ≤1.5×线宽）且离本段不远的全部轮廓点，
-    投影到直线方向，用 0.2%/99.8% 分位作为笔迹范围，再内缩半个线宽（端帽半径）。
+    投影到直线方向，取极值作为笔迹范围，再内缩半个线宽（端帽半径）。
+
+    注：曾试过与 `_arc_extent` 统一的"±30° 扇区穿越点法"，实测反而变差
+    （P95 0.547→1.125 px、关键尺寸 0.0465→0.5966 mm），已回退。
     """
     direction = np.asarray(model.direction, dtype=np.float64)
     normal = np.asarray(model.normal, dtype=np.float64)
@@ -1006,7 +1009,9 @@ def _arc_extent(
     """
     if model.radius <= 1e-9:
         return start_angle, end_angle
-    max_extension_deg = math.degrees(2.5 / model.radius)
+    # 延伸上限按**线宽倍数**表达（用户决策）：固定 px 上限在不同半径下换算出的角度
+    # 补偿量差异极大，缺乏物理意义。0.8×线宽 ≈ 4.8px → arc_120 上约 1.6°/侧。
+    max_extension_deg = math.degrees(0.8 * linewidth_px / model.radius)
 
     def extend(angle_deg: float, direction: float) -> float:
         probe = math.radians(angle_deg)
