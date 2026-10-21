@@ -311,7 +311,13 @@ def _parabola_crossing(ts: np.ndarray, vals: np.ndarray, target: float) -> float
 def _edge_offset(
     gray: np.ndarray, cx: float, cy: float, nx: float, ny: float
 ) -> float | None:
-    """沿法线找 50% 电平穿越（相对轮廓点的亚像素偏移）。"""
+    """沿法线找 50% 电平穿越（相对轮廓点的亚像素偏移）。
+
+    **双向搜索、取离 0 最近的穿越**：轮廓点来自二值掩膜边界，而掩膜会把"半墨像素"
+    （例如墨量 0.75）也算成前景，于是真正的 50% 电平落在轮廓点**内侧**。旧实现按
+    t 从 −span 到 +span 扫描、返回**第一个**穿越，在细笔画上会抓到笔画另一侧的边缘
+    （±2px 窗口已经跨过整条 2px 笔画），实测把 0.18mm 笔画的墨宽抬高了 0.69px。
+    """
     ts = np.arange(-_SUBPIX_SPAN_PX, _SUBPIX_SPAN_PX + 1e-9, _SUBPIX_STEP_PX)
     values = _bilinear(gray, cx + ts * nx, cy + ts * ny)
     low, high = float(values.min()), float(values.max())
@@ -319,10 +325,12 @@ def _edge_offset(
         return None
     target = 0.5 * (low + high)
     centered = values - target
+    crossings: list[float] = []
     for index in range(len(ts) - 1):
         a, b = centered[index], centered[index + 1]
         if a == 0.0:
-            return float(ts[index])
+            crossings.append(float(ts[index]))
+            continue
         if a * b > 0:
             continue
         if index == 0:
@@ -332,11 +340,13 @@ def _edge_offset(
         else:
             triple = slice(index - 1, index + 2)
         crossing = _parabola_crossing(ts[triple], values[triple], target)
-        if crossing is not None:
-            return crossing
-        # 抛物线解不出时退回线性插值
-        return float(ts[index] + (ts[index + 1] - ts[index]) * (a / (a - b)))
-    return None
+        if crossing is None:
+            # 抛物线解不出时退回线性插值
+            crossing = float(ts[index] + (ts[index + 1] - ts[index]) * (a / (a - b)))
+        crossings.append(float(crossing))
+    if not crossings:
+        return None
+    return min(crossings, key=abs)
 
 
 def _width_at(

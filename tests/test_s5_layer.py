@@ -68,13 +68,6 @@ def _pipeline(image: np.ndarray, cfg: R2VConfig, *, tmp: Path | None = None, pag
 # ---------------------------------------------------------------------------
 # 判据 ①：3 档线宽
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(
-    reason="已知缺陷：0.18mm(≈2.1px @300DPI) 细笔画的墨宽被高估。实测 2.82px vs 真值 2.13px"
-           "（+0.69px = 0.058mm > 0.02mm 判据）；4.1px/5.9px 档误差仅 +0.11/+0.16px。"
-           "根因在 S2 `subpixel_edges`：细笔画的二值掩膜把半墨像素也吃进来，"
-           "轮廓点落在掩膜边界而非 50% 电平处。",
-    strict=False,
-)
 def test_three_linewidth_clusters(cfg: R2VConfig) -> None:
     # 300 DPI 下 0.18/0.35/0.50 mm ≈ 2.13/4.13/5.91 px
     widths_px = [0.18 / MM_PER_PX, 0.35 / MM_PER_PX, 0.50 / MM_PER_PX]
