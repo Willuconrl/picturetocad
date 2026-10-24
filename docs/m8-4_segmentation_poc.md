@@ -182,3 +182,43 @@ Cost(k) = SSE(k) + λ · ln(n) · p(M1,M2)        # p(LINE)=2, p(ARC)=3
 
 - **未**把 `test_bulge_diagnosis` 的 P95 锚点收紧到 ≤1.0（当前实测 13.7，会直接红）。
 - **未**合并到 `master`：bulge 的原子基元不是 1 LINE + 1 ARC，P95 反而比 M8-3 的 10.975 更差。
+
+## Phase 5：静默降级的根因定位（已修复根因，但 ARC 朝向仍错）
+
+### 根因（第 3 项问题的答案）
+
+**位置**：`run_s4_fit` 里调用预言机的那一行 + `split_and_fit(plan=...)` 的输入。
+
+**条件**：`plan_segmentation(fit_points, ...)` 吃的是 **DP 简化后**的拟合点
+（`fit_points = simplified`，本例只有 **12 个点**）。预言机内部要求
+`len(points) >= 2*MIN_POINTS = 20` 才有意义，12 点直接走兜底分支返回
+`Plan(split_indices=(), model_types=("LINE",))` —— 整条边被当成一段 LINE。
+随后在圆弧/直线降级判断处（`too_rough = model.rms > tolerance_px`，
+实测 **rms 42.753 px** vs 1.772 px）被写成 `lwpolyline`，而**只写进了
+`primitive.reason`，没有 append 到 `warnings`** —— 这就是"静默降级"。
+
+### 已修复
+
+1. **预言机改用稠密中心线**：`plan_segmentation(centerline, ...)`；
+   计划切点多于 1 段时，`split_and_fit` 也改用 `centerline` 拟合（直线/圆弧都更准）。
+2. **零静默失败**：两条降级路径现在都会 append 结构化 warning：
+   - `LINE_DEGRADED_TO_POLYLINE edge={id} seg={i} rms_px=… tolerance_px=… points=…`
+   - `ARC_DEGRADED_TO_POLYLINE edge={id} seg={i} rms_px=… limit_px=… radius_px=… min_radius_px=… reason=ARC_RMS_EXCEEDS_TOLERANCE|ARC_RADIUS_TOO_SMALL`
+
+### 效果
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| bulge 基元 | 1×lwpolyline（原子 11 LINE） | **1 LINE + 1 ARC** ✓ |
+| LINE rms / 长度 | 42.753 px（降级） | **0.146 px** / 214.5 px ✓ |
+| ARC rms / r / sweep | — | **0.178 px** / 146.94 px / 107.52°（真值 r=148）✓ |
+| **bulge P95** | 13.700 px | **94.137 px** ✗ |
+
+**新问题**：基元数量、类型、半径、残差全部正确，但几何位置与 golden 呈**镜像**
+（P95 94 px ≈ 2×矢高），即圆弧凸向与 golden 相反。属于 ARC 朝向/端点角度的
+符号问题，与切分器无关。**未合并到 master**（P95 远未达标）。
+
+### 测试状态
+
+`343 passed, 1 xfailed`；`check_contracts` `errors=0 warnings=1`。
+三张全绿场景未受影响（0.219 / 0.302 / 0.126 px）。

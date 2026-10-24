@@ -788,9 +788,9 @@ def run_s4_fit(
         # M8-4：切分预言机只给"切点 + 模型类型"，拟合与后处理仍走本函数既有链路
         from src.s4_segment import plan_segmentation
 
-        _plan = plan_segmentation(fit_points, tolerance_px=arc_residual_px)
+        _plan = plan_segmentation(centerline, tolerance_px=arc_residual_px)
         segments, segment_warnings = split_and_fit(
-            fit_points,
+            centerline if _plan.segment_count > 1 else fit_points,
             tolerance_px=tolerance_px,
             alpha=alpha,
             prefer_arcs=bool(fitting.prefer_arcs),
@@ -878,6 +878,12 @@ def run_s4_fit(
                 model = segment.model
                 # 直线必须**紧**：容差用几何容差（≈1px），不是圆弧的宽松残差上限
                 too_rough = model.rms > tolerance_px
+                if too_rough:
+                    warnings.append(
+                        f"LINE_DEGRADED_TO_POLYLINE edge={edge.id} seg={index} "
+                        f"rms_px={model.rms:.3f} tolerance_px={tolerance_px:.3f} "
+                        f"points={len(segment.points)}"
+                    )
                 emit(
                     kind="lwpolyline" if too_rough else "line",
                     node_a=node_a, node_b=node_b, start=start, end=end,
@@ -953,6 +959,14 @@ def run_s4_fit(
                 too_rough = model.rms > arc_residual_px
                 too_small = model.radius < float(fitting.min_arc_radius_linewidths) * source.linewidth_px
                 if too_rough or too_small:
+                    warnings.append(
+                        "ARC_DEGRADED_TO_POLYLINE edge={} seg={} rms_px={:.3f} "
+                        "limit_px={:.3f} radius_px={:.3f} min_radius_px={:.3f} reason={}".format(
+                            edge.id, index, model.rms, arc_residual_px, model.radius,
+                            float(fitting.min_arc_radius_linewidths) * source.linewidth_px,
+                            "ARC_RMS_EXCEEDS_TOLERANCE" if too_rough else "ARC_RADIUS_TOO_SMALL",
+                        )
+                    )
                     reason = (
                         f"arc rms {model.rms:.3f}px > {arc_residual_px:.3f}px"
                         if too_rough
