@@ -461,15 +461,45 @@ def generate(images_dir: Path, golden_dir: Path) -> list[str]:
     return written
 
 
+def _png_pixel_delta(committed: Path, rendered: bytes) -> tuple[bool, float, float, str]:
+    """比较两张 PNG 的**像素**（不是字节）。
+
+    为什么不能比字节：PNG 的字节流取决于编码器/压缩库版本。GitHub 的 Linux runner
+    与本地 Windows 装的是同一个 opencv 版本、但链接的 libpng/zlib 不同，压缩结果不同，
+    于是"字节相等"在跨平台 CI 上必然误报（2026-10-24 首次 CI 的 Run tests 就栽在这）。
+    几何真值由 DXF 字节比对保证；输入图这里是"像素级近似相等"即可。
+    返回 (ok, max_abs_diff, mean_abs_diff, 说明)。
+    """
+    committed_image = cv2.imdecode(np.frombuffer(committed.read_bytes(), np.uint8), cv2.IMREAD_GRAYSCALE)
+    rendered_image = cv2.imdecode(np.frombuffer(rendered, np.uint8), cv2.IMREAD_GRAYSCALE)
+    if committed_image is None or rendered_image is None:
+        return False, 255.0, 255.0, "无法解码 PNG"
+    if committed_image.shape != rendered_image.shape:
+        return False, 255.0, 255.0, f"尺寸不同 {committed_image.shape} vs {rendered_image.shape}"
+    delta = np.abs(committed_image.astype(np.int16) - rendered_image.astype(np.int16))
+    max_diff = float(delta.max()) if delta.size else 0.0
+    mean_diff = float(delta.mean()) if delta.size else 0.0
+    ok = max_diff <= 8.0 and mean_diff <= 0.5
+    return ok, max_diff, mean_diff, ""
+
+
 def check(images_dir: Path, golden_dir: Path) -> list[str]:
-    """校验磁盘资产与代码定义一致（逐字节）；返回问题清单（空 = 通过）。"""
+    """校验磁盘资产与代码定义一致；返回问题清单（空 = 通过）。
+
+    - PNG：**像素级**比对（跨平台渲染/压缩差异容忍 max≤8、mean≤0.5）；
+    - DXF：仍要求**逐字节**相等（SPEC §3.3 的比特级可复现契约）。
+    """
     problems: list[str] = []
     for scene in all_scenes():
         png = images_dir / scene.image_name
         if not png.is_file():
             problems.append(f"缺图：{png}")
-        elif png.read_bytes() != render_png_bytes(scene):
-            problems.append(f"图与代码不一致（像素有差异）：{png}")
+        else:
+            ok, max_diff, mean_diff, note = _png_pixel_delta(png, render_png_bytes(scene))
+            if not ok:
+                problems.append(
+                    f"图与代码不一致：{png}（max|Δ|={max_diff:.0f}, mean|Δ|={mean_diff:.3f}）{note}"
+                )
         dxf = golden_dir / scene.dxf_name
         if not dxf.is_file():
             problems.append(f"缺 golden：{dxf}")
