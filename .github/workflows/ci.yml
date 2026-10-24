@@ -64,6 +64,8 @@ jobs:
 
       - name: Check contracts
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
           python scripts/check_contracts.py > contracts.log 2>&1
@@ -124,6 +126,8 @@ jobs:
 
       - name: Check contracts
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
           python scripts/check_contracts.py > contracts.log 2>&1
