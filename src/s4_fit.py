@@ -40,13 +40,15 @@ from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
 from scipy.stats import f as f_dist
 
+from src.arc_snap import snap_arc_endpoint
 from src.artifacts import StageMetrics, write_json, write_metrics
 from src.config import R2VConfig
+from src.geom_utils import line_circle_intersections
 from src.s3_skeleton import TopologyGraph
 
 PrimitiveKind = Literal["line", "arc", "circle", "lwpolyline"]
@@ -94,6 +96,10 @@ class Primitive(_Model):
     rms_px: float = 0.0
     source_edge_ids: tuple[int, ...] = ()
     reason: str = ""
+    seam_aligned: bool = Field(
+        default=False,
+        description="被 M9-3 接缝对齐改写过的基元：端点由几何约束刻意移动，G1 复检应豁免",
+    )
 
 
 class FitResult(_Model):
@@ -649,6 +655,117 @@ def _point_near(p: Sequence[float], target: Sequence[float], tolerance: float) -
     return math.hypot(p[0] - target[0], p[1] - target[1]) <= tolerance
 
 
+def _seam_angle_delta(a_deg: float, b_deg: float) -> float:
+    """两个角度之间的最小夹角（度，0..180）。"""
+    return min((a_deg - b_deg) % 360.0, (b_deg - a_deg) % 360.0)
+
+
+def _align_line_arc_seams(
+    primitives: list["Primitive"],
+    *,
+    max_snap_mm: float,
+    mm_per_px: float,
+    warnings: list[str],
+) -> dict[str, int]:
+    """M9-3：延伸/吸附之后，把 LINE↔ARC 接缝两侧端点改到闭式交点。
+
+    接缝端用**角度语义**判定（延伸后端点坐标已不可靠），加 2° 跨度门禁；
+    被改写的 ARC 打 `seam_aligned=True`，供 `_enforce_g1` 豁免。
+    """
+    stats = {
+        "seams_processed": 0,
+        "seams_skipped_no_solution": 0,
+        "seams_skipped_sanity": 0,
+        "seams_skipped_sweep_drift": 0,
+        "seams_skipped_out_of_span": 0,
+    }
+    for index in range(len(primitives) - 1):
+        first, second = primitives[index], primitives[index + 1]
+        if {first.kind, second.kind} != {"line", "arc"}:
+            continue
+        line_primitive = first if first.kind == "line" else second
+        arc_primitive = second if first.kind == "line" else first
+        if arc_primitive.center is None or arc_primitive.radius_px is None:
+            continue
+        centre = np.asarray(arc_primitive.center, dtype=np.float64)
+        seam = np.asarray(first.end, dtype=np.float64)
+        direction = np.asarray(line_primitive.end, dtype=np.float64) - np.asarray(
+            line_primitive.start, dtype=np.float64
+        )
+        hits = line_circle_intersections(
+            tuple(line_primitive.start), tuple(direction), tuple(centre),
+            float(arc_primitive.radius_px),
+        )
+        if not hits:
+            stats["seams_skipped_no_solution"] += 1
+            warnings.append(f"SEAM_ALIGN_NO_INTERSECTION prims={index}/{index + 1}")
+            continue
+        snap = min(hits, key=lambda pt: float(np.hypot(pt[0] - seam[0], pt[1] - seam[1])))
+        distance_mm = float(np.hypot(snap[0] - seam[0], snap[1] - seam[1])) * mm_per_px
+        if distance_mm > max_snap_mm:
+            stats["seams_skipped_sanity"] += 1
+            warnings.append(
+                f"SEAM_ALIGN_TOO_FAR dist_mm={distance_mm:.3f} limit_mm={max_snap_mm:.3f}"
+            )
+            continue
+        hit_angle = math.degrees(math.atan2(snap[1] - centre[1], snap[0] - centre[0])) % 360.0
+        start_deg = float(arc_primitive.start_angle_deg)
+        end_deg = float(arc_primitive.end_angle_deg)
+        d_start = _seam_angle_delta(hit_angle, start_deg)
+        d_end = _seam_angle_delta(hit_angle, end_deg)
+        if min(d_start, d_end) > 2.0:
+            stats["seams_skipped_out_of_span"] += 1
+            warnings.append(
+                f"SEAM_ALIGN_OUT_OF_SPAN hit_angle={hit_angle:.3f} nearest={min(d_start, d_end):.3f}deg"
+            )
+            continue
+        snap_arc_start = d_start <= d_end
+        snap_xy = (round(float(snap[0]), 4), round(float(snap[1]), 4))
+        arc_update = snap_arc_endpoint(
+            center=arc_primitive.center,
+            new_endpoint=snap_xy,
+            start_deg=start_deg,
+            end_deg=end_deg,
+            sweep_deg=float(arc_primitive.sweep_deg or 0.0),
+            snap_start=snap_arc_start,
+        )
+        if arc_update is None:
+            stats["seams_skipped_sweep_drift"] += 1
+            warnings.append(f"SEAM_ALIGN_SWEEP_DRIFT prims={index}/{index + 1}")
+            continue
+        line_start = np.asarray(line_primitive.start, dtype=np.float64)
+        line_end = np.asarray(line_primitive.end, dtype=np.float64)
+        if np.hypot(*(line_end - seam)) <= np.hypot(*(line_start - seam)):
+            new_start, new_end = line_primitive.start, snap_xy
+        else:
+            new_start, new_end = snap_xy, line_primitive.end
+        new_length = float(np.hypot(new_end[0] - new_start[0], new_end[1] - new_start[1]))
+        # 两个基元必须写回**各自的槽位**：`second is arc` 在"弧在前"时与直线槽位重合，
+        # 曾因此把 LINE 覆盖成第二条 ARC（2-ARC 伪影的根因）。
+        line_position = index if first is line_primitive else index + 1
+        arc_position = index if first is arc_primitive else index + 1
+        primitives[line_position] = line_primitive.model_copy(
+            update={"start": new_start, "end": new_end, "length_px": round(new_length, 4)}
+        )
+        arc_start_new, arc_end_new = (
+            (snap_xy, arc_primitive.end) if snap_arc_start else (arc_primitive.start, snap_xy)
+        )
+        arc_length = abs(math.radians(arc_update["sweep_deg"])) * float(arc_primitive.radius_px)
+        primitives[arc_position] = arc_primitive.model_copy(
+            update={
+                "start": arc_start_new,
+                "end": arc_end_new,
+                "start_angle_deg": arc_update["start_angle_deg"],
+                "end_angle_deg": arc_update["end_angle_deg"],
+                "sweep_deg": arc_update["sweep_deg"],
+                "length_px": round(arc_length, 4),
+                "seam_aligned": True,
+            }
+        )
+        stats["seams_processed"] += 1
+    return stats
+
+
 def run_s4_fit(
     source: S4Input,
     cfg: R2VConfig,
@@ -1019,6 +1136,14 @@ def run_s4_fit(
                     )
 
     # G1 复检：同一节点上两基元的切线角差超过容差 → 降级多段线（保守，不猜）
+    # M9-3：接缝对齐（延伸/吸附之后、G1 复检之前）
+    seam_stats = _align_line_arc_seams(
+        primitives,
+        max_snap_mm=2.0,
+        mm_per_px=mm_per_px,
+        warnings=warnings,
+    )
+
     g1_limit = float(fitting.g1_tangent_tolerance_deg)
     primitives = _enforce_g1(primitives, nodes, graph, limit_deg=g1_limit, warnings=warnings)
 
@@ -1279,6 +1404,9 @@ def _enforce_g1(
                 if angle <= limit_deg:
                     continue
                 for candidate in (first, second):
+                    # M9-3 豁免：接缝对齐刻意移动过端点的基元，切线在构造上连续到吸附量级。
+                    if candidate.seam_aligned:
+                        continue
                     if candidate.kind in ("arc", "circle") and candidate.id not in degraded:
                         degraded.add(candidate.id)
                         warnings.append(
