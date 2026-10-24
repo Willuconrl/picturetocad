@@ -5,7 +5,7 @@
 README 顶部徽章的 URL 目前是占位形式：
 
 ```
-https://github.com/OWNER/r2v-tool/actions/workflows/ci.yml/badge.svg
+https://github.com/Willuconrl/picturetocad/actions/workflows/ci.yml/badge.svg
 ```
 
 首次 `git push` 到 GitHub 之后，把 `OWNER` 替换成实际账号/组织名即可。**不影响 CI 运行**，
@@ -15,12 +15,12 @@ https://github.com/OWNER/r2v-tool/actions/workflows/ci.yml/badge.svg
 
 ```bash
 # Linux / macOS / Git Bash
-sed -i 's#github.com/OWNER/r2v-tool#github.com/<你的账号>/r2v-tool#g' README.md docs/CI.md
+sed -i 's#github.com/Willuconrl/picturetocad#github.com/<你的账号>/r2v-tool#g' README.md docs/CI.md
 ```
 
 ```powershell
 # Windows PowerShell
-(Get-Content README.md -Raw) -replace 'github.com/OWNER/r2v-tool','github.com/<你的账号>/r2v-tool' |
+(Get-Content README.md -Raw) -replace 'github.com/Willuconrl/picturetocad','github.com/<你的账号>/r2v-tool' |
   Set-Content README.md -NoNewline
 ```
 

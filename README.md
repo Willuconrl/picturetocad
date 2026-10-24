@@ -1,6 +1,6 @@
 # r2v-tool
 
-[![ci](https://github.com/OWNER/r2v-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/r2v-tool/actions/workflows/ci.yml)
+[![ci](https://github.com/Willuconrl/picturetocad/actions/workflows/ci.yml/badge.svg)](https://github.com/Willuconrl/picturetocad/actions/workflows/ci.yml)
 
 > 徽章 URL 需在首次推送到 GitHub 后，把 `OWNER` 换成实际账号/组织名（本仓库当前未推送，
 > 徽章不会亮起，这是预期状态）。
