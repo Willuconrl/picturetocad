@@ -262,7 +262,12 @@ def _circle_kasa(points: np.ndarray) -> CircleModel | None:
 
 
 def refine_circle_lm(points: np.ndarray, initial: CircleModel) -> CircleModel:
-    """几何距离 LM 精化：min Σ(‖p−c‖ − r)²。"""
+    """几何距离 LM 精化：min Σ(‖p−c‖ − r)²。
+
+    M9-4.2：`x0` 若非有限值（退化点集使 Kåsa 解出 NaN/inf），scipy 会抛
+    `ValueError: Initial guess is outside of provided bounds` —— 真实图上确实触发过。
+    这里先做数值校验，退化时直接返回初始解，不让整条管线崩掉。
+    """
     x = points[:, 0]
     y = points[:, 1]
 
@@ -270,9 +275,13 @@ def refine_circle_lm(points: np.ndarray, initial: CircleModel) -> CircleModel:
         cx, cy, radius = params
         return np.hypot(x - cx, y - cy) - radius
 
+    x0 = np.array([initial.center[0], initial.center[1], initial.radius], dtype=np.float64)
+    if not np.all(np.isfinite(x0)) or initial.radius <= 0.0 or len(points) < 3:
+        return initial
+
     result = least_squares(
         residuals,
-        x0=np.array([initial.center[0], initial.center[1], initial.radius]),
+        x0=x0,
         method="lm",
         max_nfev=200,
     )
@@ -766,6 +775,20 @@ def _align_line_arc_seams(
     return stats
 
 
+def _primitive_is_finite(primitive: Primitive) -> bool:
+    """基元的所有坐标是否有限（真实图上退化拟合会产生 NaN，不能流到 S5/S8）。"""
+    values: list[float] = []
+    for pair in (primitive.start, primitive.end, primitive.center):
+        if pair is not None:
+            values.extend(float(v) for v in pair)
+    for point in primitive.points:
+        values.extend(float(v) for v in point)
+    for scalar in (primitive.radius_px, primitive.start_angle_deg, primitive.end_angle_deg, primitive.sweep_deg):
+        if scalar is not None:
+            values.append(float(scalar))
+    return all(math.isfinite(value) for value in values)
+
+
 def run_s4_fit(
     source: S4Input,
     cfg: R2VConfig,
@@ -1147,6 +1170,17 @@ def run_s4_fit(
     g1_limit = float(fitting.g1_tangent_tolerance_deg)
     primitives = _enforce_g1(primitives, nodes, graph, limit_deg=g1_limit, warnings=warnings)
 
+    # M9-4.2：丢弃坐标非有限的基元（真实图上的退化拟合会产生 NaN），并显式告警
+    finite_primitives: list[Primitive] = []
+    for primitive in primitives:
+        if _primitive_is_finite(primitive):
+            finite_primitives.append(primitive)
+        else:
+            warnings.append(
+                f"S4_NONFINITE_PRIMITIVE_DROPPED id={primitive.id} kind={primitive.kind}"
+            )
+    primitives = finite_primitives
+
     counts: dict[str, int] = {}
     for primitive in primitives:
         counts[primitive.kind] = counts.get(primitive.kind, 0) + 1
@@ -1234,6 +1268,10 @@ def _line_extent(
     end: tuple[float, float],
     linewidth_px: float,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
+    # M9-4.2：真实图上出现过 NaN 端点（退化点集）→ cKDTree 直接抛异常。
+    # 非有限时原样返回，宁可少延伸也不让整条管线崩掉。
+    if not all(math.isfinite(v) for v in (*start, *end)):
+        return start, end
     """把线段两端延伸到笔画端帽（骨架端点通常比笔迹端点缩进 0.5–2 px）。
 
     做法：取**走廊内**（到直线距离 ≤1.5×线宽）且离本段不远的全部轮廓点，
@@ -1281,6 +1319,9 @@ def _arc_extent(
     contour_points: np.ndarray,
     linewidth_px: float,
 ) -> tuple[float, float]:
+    if not (math.isfinite(start_angle) and math.isfinite(end_angle)
+            and all(math.isfinite(v) for v in model.center) and math.isfinite(model.radius)):
+        return start_angle, end_angle
     """把弧端点沿圆周延伸到墨迹端（骨架节点比墨迹端短 1–2px）。
 
     判据（用户确认）：沿**半径方向**找 S2 轮廓穿越点 —— 在该端 ±30° 扇区、且到圆心距离
