@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import PRESET_NAMES, ConfigError, load_yaml_mapping
+from src.config import PRESET_NAMES, ConfigError, load_config, load_yaml_mapping
 from src.presets import (
     PresetError,
     apply_overrides,
@@ -28,8 +28,10 @@ def base_data() -> dict:
     return load_yaml_mapping(CONFIG)
 
 
-def test_resolve_presets_path_from_skill_dir() -> None:
-    path = resolve_presets_path(CONFIG, ".dsh/skills/r2v-domain/presets.yaml")
+def test_resolve_presets_path_from_config() -> None:
+    """预设文件路径由 config.yaml 声明（M9-4 起 vendored 进仓库 config/presets.yaml）。"""
+    declared = load_config(CONFIG).presets.file
+    path = resolve_presets_path(CONFIG, declared)
     assert path.is_file()
     assert path.name == "presets.yaml"
 
@@ -40,7 +42,8 @@ def test_resolve_presets_path_missing() -> None:
 
 
 def test_presets_file_declares_four_presets() -> None:
-    path = resolve_presets_path(CONFIG, ".dsh/skills/r2v-domain/presets.yaml")
+    declared = load_config(CONFIG).presets.file
+    path = resolve_presets_path(CONFIG, declared)
     preset_file = load_presets(path)
     assert preset_file.version == "0.2"
     assert set(preset_file.presets) == set(PRESET_NAMES)
