@@ -783,6 +783,170 @@ class S3Result:
     raw_edges: int
 
 
+def _line_fit_near_node(points: np.ndarray, node_xy: tuple[float, float], window_px: float) -> tuple[np.ndarray, np.ndarray] | None:
+    """在靠近节点的一段（弧长 window_px）上做 TLS 直线拟合，返回 (点, 单位方向)。"""
+    distances = np.hypot(points[:, 0] - node_xy[0], points[:, 1] - node_xy[1])
+    mask = (distances >= 0.5 * window_px) & (distances <= window_px)
+    sample = points[mask]
+    if len(sample) < 3:
+        return None
+    centre = sample.mean(axis=0)
+    _, _, vt = np.linalg.svd(sample - centre, full_matrices=False)
+    direction = vt[0] / (np.linalg.norm(vt[0]) or 1.0)
+    return centre, direction
+
+
+def _intersect_lines(a: tuple[np.ndarray, np.ndarray], b: tuple[np.ndarray, np.ndarray]) -> np.ndarray | None:
+    (p1, d1), (p2, d2) = a, b
+    matrix = np.array([[d1[0], -d2[0]], [d1[1], -d2[1]]])
+    if abs(np.linalg.det(matrix)) < 1e-9:
+        return None
+    t = np.linalg.solve(matrix, p2 - p1)
+    return p1 + t[0] * d1
+
+
+def _fit_circle_kasa(points: np.ndarray) -> tuple[np.ndarray, float] | None:
+    """Kåsa 代数圆拟合（闭式解），返回 (圆心, 半径)；点数不足或退化时返回 None。"""
+    if len(points) < 5:
+        return None
+    x = points[:, 0]
+    y = points[:, 1]
+    matrix = np.column_stack([x, y, np.ones_like(x)])
+    rhs = x * x + y * y
+    try:
+        solution, *_ = np.linalg.lstsq(matrix, rhs, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    cx = solution[0] / 2.0
+    cy = solution[1] / 2.0
+    value = solution[2] + cx * cx + cy * cy
+    if not np.isfinite(value) or value <= 0:
+        return None
+    return np.array([cx, cy]), float(math.sqrt(value))
+
+
+def _line_circle_intersections(
+    point: np.ndarray, direction: np.ndarray, centre: np.ndarray, radius: float
+) -> list[np.ndarray]:
+    """直线与圆的闭式交点（解一元二次方程，无迭代）。"""
+    offset = point - centre
+    b = 2.0 * float(offset @ direction)
+    c = float(offset @ offset) - radius * radius
+    disc = b * b - 4.0 * c
+    if disc < 0:
+        return []
+    root = math.sqrt(disc)
+    return [point + t * direction for t in ((-b - root) / 2.0, (-b + root) / 2.0)]
+
+
+def sharpen_corners(graph: TopologyGraph, *, min_angle_deg: float, window_px: float) -> tuple[TopologyGraph, int]:
+    """把 line↔line 的 `corner` 节点替换为**两侧直线段的解析交点**（M9-1）。
+
+    形态学骨架在折点处必然"切角"：30° 内角内缩 0.86mm、60° 0.30mm、90° 0.18mm
+    （见 `scripts/diagnose_corner.py`）。这里对每个 `corner` 节点，用两侧近端一段点
+    各拟合一条直线，求交后把节点与相邻边的端点都移到交点上；内角小于门限（急弯）
+    时保持原样，避免破坏端帽。
+
+    只处理**度=2 且两条边都是直线型**（点数足够且切线连续）的拐点；拓扑与段数不变。
+    """
+    nodes = [node.model_copy() for node in graph.nodes]
+    edges = [edge.model_copy() for edge in graph.edges]
+    by_id = {node.id: index for index, node in enumerate(nodes)}
+    sharpened = 0
+    for node in nodes:
+        if node.type != "corner" or node.degree != 2 or len(node.edges) != 2:
+            continue
+        incident = [edges[edge_id] for edge_id in node.edges if edge_id < len(edges)]
+        if len(incident) != 2 or any(edge.closed or edge.closed_loop for edge in incident):
+            continue
+        node_xy = (node.x, node.y)
+        fits = []
+        for edge in incident:
+            pts = np.asarray(edge.points, dtype=np.float64)
+            if len(pts) < 4:
+                fits = []
+                break
+            fits.append(_line_fit_near_node(pts, node_xy, window_px))
+        if len(fits) != 2 or fits[0] is None or fits[1] is None:
+            continue
+        (c1, d1), (c2, d2) = fits
+        # 方向统一成"远离节点"，内角 = 两方向夹角
+        v1 = c1 - np.asarray(node_xy)
+        v2 = c2 - np.asarray(node_xy)
+        if d1 @ v1 < 0:
+            d1 = -d1
+        if d2 @ v2 < 0:
+            d2 = -d2
+        cosine = float(np.clip(d1 @ d2, -1.0, 1.0))
+        interior_deg = math.degrees(math.acos(cosine))
+        if interior_deg < min_angle_deg:
+            continue
+        intersection = _intersect_lines((c1, d1), (c2, d2))
+        if intersection is None:
+            # line↔arc 接缝：一侧拟合直线，另一侧拟合圆，求闭式交点（M9-1 Phase 3）
+            circles = []
+            for edge in incident:
+                pts = np.asarray(edge.points, dtype=np.float64)
+                circles.append(_fit_circle_kasa(pts))
+            pair = None
+            for index in (0, 1):
+                circle = circles[index]
+                line_fit = fits[1 - index]
+                if circle is None or line_fit is None:
+                    continue
+                centre_c, radius_c = circle
+                line_point, line_dir = line_fit
+                # 圆拟合残差要明显小于直线拟合，才认定为"弧侧"
+                pts_arc = np.asarray(incident[index].points, dtype=np.float64)
+                circle_rms = float(np.sqrt(np.mean((np.hypot(pts_arc[:,0]-centre_c[0], pts_arc[:,1]-centre_c[1]) - radius_c) ** 2)))
+                line_rms = float(np.sqrt(np.mean(((pts_arc - line_point) @ np.array([-line_dir[1], line_dir[0]])) ** 2)))
+                if circle_rms >= line_rms:
+                    continue
+                candidates = _line_circle_intersections(line_point, line_dir, centre_c, radius_c)
+                if not candidates:
+                    continue
+                best = min(candidates, key=lambda pt: math.hypot(pt[0] - node.x, pt[1] - node.y))
+                # 切向角：直线方向 vs 圆在该点的切线（都指向远离节点一侧）
+                normal = (best - centre_c) / max(float(np.linalg.norm(best - centre_c)), 1e-9)
+                tangent = np.array([-normal[1], normal[0]])
+                if tangent @ (line_point - best) < 0:
+                    tangent = -tangent
+                cosine = float(np.clip(abs(tangent @ line_dir), -1.0, 1.0))
+                angle_deg = math.degrees(math.acos(cosine))
+                if angle_deg < min_angle_deg:
+                    continue
+                pair = best
+                break
+            intersection = pair
+            if intersection is None:
+                continue
+        offset = float(np.hypot(intersection[0] - node.x, intersection[1] - node.y))
+        if not np.isfinite(offset) or offset > 3.0 * window_px:
+            continue
+        new_xy = (round(float(intersection[0]), 4), round(float(intersection[1]), 4))
+        nodes[by_id[node.id]] = node.model_copy(update={"x": new_xy[0], "y": new_xy[1]})
+        for edge in incident:
+            pts = [list(p) for p in edge.points]
+            if edge.node_a == node.id:
+                pts[0] = [new_xy[0], new_xy[1]]
+            if edge.node_b == node.id:
+                pts[-1] = [new_xy[0], new_xy[1]]
+            trimmed = np.asarray(pts, dtype=np.float64)
+            length = float(np.hypot(*(np.diff(trimmed, axis=0).T)).sum()) if len(trimmed) > 1 else edge.length_px
+            updated = edge.model_copy(
+                update={
+                    "points": tuple((round(float(px), 4), round(float(py), 4)) for px, py in trimmed),
+                    "length_px": round(length, 4),
+                }
+            )
+            edges[edge.id] = updated
+            incident = [updated if item.id == edge.id else item for item in incident]
+        sharpened += 1
+    if sharpened == 0:
+        return graph, 0
+    return graph.model_copy(update={"nodes": tuple(nodes), "edges": tuple(edges)}), sharpened
+
+
 def run_s3_skeleton(
     binary: np.ndarray,
     cfg: R2VConfig,
@@ -916,6 +1080,15 @@ def run_s3_skeleton(
         skeleton_path=chosen,  # type: ignore[arg-type]
         width_cv={name: round(value, 6) for name, value in scores.items()},
     )
+
+    # M9-1：拐点锐化（解析交点替换骨架顶点）。只动 corner 节点坐标与相邻边端点。
+    topology, sharpened = sharpen_corners(
+        topology,
+        min_angle_deg=float(cfg.skeleton.corner_sharpen_min_angle_deg),
+        window_px=max(6.0, 3.0 * float(linewidth_px)),
+    )
+    if sharpened:
+        warnings.append(f"corner_sharpening: {sharpened} 个拐点用解析交点替换")
 
     timing_ms = round((time.perf_counter() - t0) * 1000.0, 3)
     metrics = StageMetrics(

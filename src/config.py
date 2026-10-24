@@ -455,6 +455,10 @@ class SkeletonAcceptanceConfig(_Section):
 
 class SkeletonConfig(_Section):
     dual_path: bool
+    corner_sharpen_min_angle_deg: float = Field(
+        ..., gt=0, le=180,
+        description="拐点锐化门控：内角 ≥ 该值时用两侧直线解析交点替换骨架顶点（M9-1）",
+    )
     thinning: ThinningConfig
     medial_axis: MedialAxisConfig
     spur_removal: SpurRemovalConfig

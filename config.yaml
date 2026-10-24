@@ -135,6 +135,8 @@ skeleton:
     length_threshold_linewidths: 2.5   # ★ 关键：毛刺 = 短于 2.5×本地线宽
     length_threshold_px: null          # 永远由上行 × 线宽 派生，别手写
     endpoint_curvature_check: true     # 端点邻域曲率大的视为真端点而非毛刺
+  corner_sharpen_min_angle_deg: 60       # 拐点锐化：内角≥该值时用两侧直线解析交点替换骨架顶点
+                                          # （300DPI 下 ±0.5px 量化 = ±0.042mm，是小角内缩的物理下界）
   node:
     snap_distance_linewidths: 1.0      # 邻近节点合并距离
     classify: true                     # 端点/T/Y/十字/角点，输出 graph.json
