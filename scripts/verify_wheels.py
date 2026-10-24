@@ -296,9 +296,18 @@ def cmd_check(path: Path) -> int:
     for pin in pins:
         base_applies = marker_allows(pin.marker, "3.10")
         local_applies = marker_allows(pin.marker, local_ver)
+        # 只在"对任何目标解释器都不适用"时才算错（说明 marker 写死了/写反了）。
+        # 否则只是"这条 pin 不属于当前解释器"——例如 CI 跑 3.10 时，`>=3.12` 组的
+        # 开发依赖本来就该 SKIP，不能判失败（2026-10-24 首次 CI 就是栽在这里）。
+        applies_anywhere = any(
+            marker_allows(pin.marker, version) for version in ("3.10", "3.12", local_ver)
+        )
         if not base_applies and not local_applies:
-            print(f"{pin.name:28s} {pin.version:12s} {'N/A':10s} {'N/A':10s} marker={pin.marker}")
-            failures += 1
+            if not applies_anywhere:
+                print(f"{pin.name:28s} {pin.version:12s} {'N/A':10s} {'N/A':10s} marker={pin.marker}")
+                failures += 1
+            else:
+                print(f"{pin.name:28s} {pin.version:12s} {'SKIP':10s} {'SKIP':10s} marker={pin.marker}")
             continue
         files = release_files(pin.name, pin.version)
         if not files:
