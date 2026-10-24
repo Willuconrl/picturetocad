@@ -63,7 +63,14 @@ jobs:
           exit $rc
 
       - name: Check contracts
-        run: python scripts/check_contracts.py
+        shell: bash
+        run: |
+          set +e
+          python scripts/check_contracts.py > contracts.log 2>&1
+          rc=$?
+          cat contracts.log
+          python scripts/ci_report_status.py contracts.log "$rc" --context contracts-detail --pattern "ERROR"
+          exit $rc
 
       - name: Smoke convert (end-to-end)
         run: |
@@ -116,7 +123,13 @@ jobs:
           exit $rc
 
       - name: Check contracts
-        run: python scripts/check_contracts.py
+        run: |
+          set +e
+          python scripts/check_contracts.py > contracts.log 2>&1
+          rc=$?
+          cat contracts.log
+          python scripts/ci_report_status.py contracts.log "$rc" --context contracts-detail --pattern "ERROR"
+          exit $rc
 
       - name: Smoke convert (end-to-end, Windows-tolerant)
         continue-on-error: true

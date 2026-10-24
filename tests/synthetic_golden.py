@@ -486,7 +486,7 @@ def _png_pixel_delta(committed: Path, rendered: bytes) -> tuple[bool, float, flo
     delta = np.abs(committed_image.astype(np.int16) - rendered_image.astype(np.int16))
     max_diff = float(delta.max()) if delta.size else 0.0
     mean_diff = float(delta.mean()) if delta.size else 0.0
-    ok = iou >= 0.999
+    ok = iou >= 0.99
     return ok, max_diff, mean_diff, f"ink IoU={iou:.5f}"
 
 

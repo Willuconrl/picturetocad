@@ -22,12 +22,12 @@ from pathlib import Path
 MAX_DESCRIPTION = 140
 
 
-def summarize(log_path: Path, returncode: str) -> str:
+def summarize(log_path: Path, returncode: str, pattern: str = "FAILED ") -> str:
     failures: list[str] = []
     if log_path.is_file():
         for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("FAILED "):
-                failures.append(line[len("FAILED "):].split(" - ")[0].strip())
+            if line.startswith(pattern):
+                failures.append(line[len(pattern):].split(" - ")[0].strip())
     prefix = f"rc={returncode} failures={len(failures)}"
     if not failures:
         return prefix[:MAX_DESCRIPTION]
@@ -38,7 +38,7 @@ def summarize(log_path: Path, returncode: str) -> str:
     return text
 
 
-def post_status(state: str, description: str) -> None:
+def post_status(state: str, description: str, context: str = "pytest-detail") -> None:
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     sha = os.environ.get("GITHUB_SHA")
@@ -46,7 +46,7 @@ def post_status(state: str, description: str) -> None:
         print("[ci_report_status] 缺少 GITHUB_TOKEN/GITHUB_REPOSITORY/GITHUB_SHA，跳过上报")
         return
     payload = json.dumps(
-        {"state": state, "context": "pytest-detail", "description": description}
+        {"state": state, "context": context, "description": description}
     ).encode("utf-8")
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/statuses/{sha}",
@@ -67,14 +67,25 @@ def post_status(state: str, description: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("用法：ci_report_status.py <pytest.log> <returncode>", file=sys.stderr)
+    if len(argv) < 3:
+        print(
+            "用法：ci_report_status.py <log> <returncode> [--context X] [--pattern PREFIX]",
+            file=sys.stderr,
+        )
         return 2
     log_path = Path(argv[1])
     returncode = argv[2]
-    description = summarize(log_path, returncode)
+    context = "pytest-detail"
+    pattern = "FAILED "
+    rest = argv[3:]
+    for index, item in enumerate(rest):
+        if item == "--context" and index + 1 < len(rest):
+            context = rest[index + 1]
+        if item == "--pattern" and index + 1 < len(rest):
+            pattern = rest[index + 1]
+    description = summarize(log_path, returncode, pattern)
     state = "success" if returncode.strip() == "0" else "failure"
-    post_status(state, description)
+    post_status(state, description, context)
     print(f"[ci_report_status] {description}")
     return 0
 
