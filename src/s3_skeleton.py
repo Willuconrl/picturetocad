@@ -59,7 +59,7 @@ _RDP_TOLERANCE_PX = 0.5
 
 #: 拐角判定：简化后折线在某个顶点的转向角 ≥ 此值就切成两个边并建"角点"节点。
 #: 这是**分类器内部常数**（骨架锯齿通常是 45° 以内的小转向），不是精度判据。
-_CORNER_TURN_DEG = 30.0
+_CORNER_TURN_DEG = 20.0
 
 #: 把一段短尾判定为"母边的自然结尾"的夹角阈值（度）
 _COLLINEAR_TAIL_DEG = 20.0
@@ -553,6 +553,72 @@ def bridge_gaps(
     return bridged
 
 
+def _resample_polyline(points: list[tuple[float, float]], *, step: float) -> list[tuple[float, float]]:
+    """按弧长 step 线性重采样折线（用于窗口转角）。"""
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < 2:
+        return [tuple(p) for p in pts]
+    seg = np.hypot(*np.diff(pts, axis=0).T)
+    total = float(seg.sum())
+    if total < 1e-9:
+        return [tuple(p) for p in pts]
+    cumulative = np.concatenate([[0.0], np.cumsum(seg)])
+    count = max(2, int(total / max(step, 1e-6)) + 1)
+    targets = np.linspace(0.0, total, count)
+    xs = np.interp(targets, cumulative, pts[:, 0])
+    ys = np.interp(targets, cumulative, pts[:, 1])
+    return list(zip(xs.tolist(), ys.tolist()))
+
+
+def _window_turns(dense: list[tuple[float, float]], w: int) -> list[float]:
+    """每点的**窗口转角**（度）：用前后相隔 w 个采样（≈w px）的弦夹角。
+
+    返回长度与 dense 相同的列表，两端（不足 w）填 0。
+    """
+    count = len(dense)
+    turns = [0.0] * count
+    pts = np.asarray(dense, dtype=np.float64)
+    for index in range(w, count - w):
+        v1 = pts[index] - pts[index - w]
+        v2 = pts[index + w] - pts[index]
+        n1 = float(np.hypot(*v1))
+        n2 = float(np.hypot(*v2))
+        if n1 < 1e-9 or n2 < 1e-9:
+            continue
+        cosine = max(-1.0, min(1.0, float(v1 @ v2) / (n1 * n2)))
+        turns[index] = math.degrees(math.acos(cosine))
+    return turns
+
+
+def _neighbour_turn_baseline(turns: list[float], index: int, w: int) -> float:
+    """拐点邻域之外的"基线转角"中位数：圆弧上它与拐点转角同量级，真拐点远小于它。"""
+    count = len(turns)
+    span = max(2 * w, w + 2)
+    samples = [
+        turns[i]
+        for i in range(0, count, max(1, w // 2))
+        if abs(i - index) > span and turns[i] > 0.0
+    ]
+    # 少于 3 个基线样本（短边/短弧）视为证据不足，返回 -1 → 保守拒绝切分
+    return float(np.median(samples)) if len(samples) >= 3 else -1.0
+
+
+def _project_back(
+    raw_points: object,
+    rdp_points: list[tuple[float, float]],
+    dense: list[tuple[float, float]],
+    dense_index: int,
+) -> tuple[list[tuple[float, float]], int]:
+    """把重采样坐标映射回**原始折线**上最近的点索引（切点必须落在真实采样点上）。"""
+    raw = [(float(p[0]), float(p[1])) for p in raw_points]  # type: ignore[union-attr]
+    if not raw:
+        return rdp_points, -1
+    target = np.asarray(dense[dense_index], dtype=np.float64)
+    array = np.asarray(raw, dtype=np.float64)
+    index = int(np.argmin(np.hypot(array[:, 0] - target[0], array[:, 1] - target[1])))
+    return raw, index
+
+
 def split_corners(
     graph: _MutableGraph,
     *,
@@ -560,6 +626,8 @@ def split_corners(
     min_arm_ratio: float = 2.0,
     turn_deg: float = _CORNER_TURN_DEG,
     simplify_tol: float = 1.0,
+    window_linewidths: float = 2.0,
+    contrast_ratio: float = 2.0,
 ) -> int:
     """把折线里明显的拐点切成独立节点（类型 corner），返回切分次数。
 
@@ -568,6 +636,7 @@ def split_corners(
     """
     split = 0
     min_arm = max(3.0, min_arm_ratio * linewidth_px)
+    w_samples = max(4, int(round(window_linewidths * linewidth_px)))
     changed = True
     while changed:
         changed = False
@@ -581,23 +650,34 @@ def split_corners(
             points = _rdp(edge["points"], simplify_tol)
             if len(points) < 3:
                 continue
-            best_index, best_turn = -1, 0.0
-            for index in range(1, len(points) - 1):
-                v1 = (points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1])
-                v2 = (points[index + 1][0] - points[index][0], points[index + 1][1] - points[index][1])
-                n1 = math.hypot(*v1)
-                n2 = math.hypot(*v2)
-                if n1 < 1e-9 or n2 < 1e-9:
-                    continue
-                cosine = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
-                turn = math.degrees(math.acos(cosine))
-                if turn > best_turn:
-                    best_index, best_turn = index, turn
-            if best_turn < turn_deg or best_index < 0:
+            # M9-4.1：拐角在骨架上是**圆化**的（笔宽 5px 时 120° 内角摊到十几个像素上），
+            # 单点转角永远到不了 30°，因此改用**窗口转角**：在 1px 重采样后取 ±w 的弦夹角，
+            # 并用"拐点转角 / 邻域基线转角"的对比度排除圆弧（圆弧的转角沿弧长均匀分布）。
+            dense = _resample_polyline([(p[0], p[1]) for p in points], step=1.0)
+            if len(dense) < 2 * w_samples + 1:
                 continue
-            left_arm = _polyline_length(points[: best_index + 1])
-            right_arm = _polyline_length(points[best_index:])
+            turns = _window_turns(dense, w_samples)
+            best_index = int(np.argmax(turns)) if turns else -1
+            best_turn = float(turns[best_index]) if best_index >= 0 else 0.0
+            if best_index < w_samples or best_turn < turn_deg:
+                continue
+            # 拐点 vs 圆弧的稳定判别：**转角饱和**。拐点在窗口加倍后转角几乎不变
+            # （t2 ≈ t1），圆弧的转角与窗口成正比（t2 ≈ 2·t1）。用 t1/t2 做判据，
+            # 不依赖邻域基线，故对短边/短弧与像素量化都稳。
+            wide = _window_turns(dense, 2 * w_samples)
+            if best_index >= 2 * w_samples:
+                wide_turn = float(wide[best_index])
+            else:
+                wide_turn = float(wide[min(len(wide) - 1, 2 * w_samples)])
+            if wide_turn <= 1e-6 or (best_turn / wide_turn) < contrast_ratio:
+                continue
+            left_arm = _polyline_length(dense[: best_index + 1])
+            right_arm = _polyline_length(dense[best_index:])
             if left_arm < min_arm or right_arm < min_arm:
+                continue
+            # 切回原始（未重采样）点列：按弧长比例取最近点
+            points, best_index = _project_back(edge["points"], points, dense, best_index)
+            if len(points) < 3 or not 0 < best_index < len(points) - 1:
                 continue
             a, b = edge["a"], edge["b"]
             corner = graph.add_node(points[best_index][0], points[best_index][1])
@@ -982,7 +1062,13 @@ def run_s3_skeleton(
 
     corners = 0
     if cfg.skeleton.node.classify:
-        corners = split_corners(graph, linewidth_px=linewidth_px)
+        corners = split_corners(
+            graph,
+            linewidth_px=linewidth_px,
+            turn_deg=float(cfg.skeleton.node.corner_turn_deg),
+            contrast_ratio=float(cfg.skeleton.node.corner_contrast_ratio),
+            window_linewidths=float(cfg.skeleton.node.corner_window_linewidths),
+        )
 
     merged = 0
     if cfg.skeleton.node.redundant_collapse:

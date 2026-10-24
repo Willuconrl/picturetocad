@@ -139,6 +139,9 @@ skeleton:
                                           # （300DPI 下 ±0.5px 量化 = ±0.042mm，是小角内缩的物理下界）
   node:
     snap_distance_linewidths: 1.0      # 邻近节点合并距离
+    corner_turn_deg: 20                # 拐点判定：±窗口弦夹角 ≥ 该值（M9-4.1）
+    corner_contrast_ratio: 0.75        # 转角饱和比 t(±w)/t(±2w)：拐点≈1、圆弧≈0.5
+    corner_window_linewidths: 2.0      # 窗口半宽（× 线宽），用于抹平骨架圆化
     classify: true                     # 端点/T/Y/十字/角点，输出 graph.json
     angle_tol_deg: 12                  # 节点类型判定的入射角容差
     redundant_collapse: true           # 共线连续节点合并

@@ -439,6 +439,9 @@ class NodeConfig(_Section):
     angle_tol_deg: float = Field(..., gt=0, lt=180)
     redundant_collapse: bool
     collinear_tol_px: float = Field(..., ge=0)
+    corner_turn_deg: float = Field(..., gt=0, le=90, description="拐点窗口转角阈值（M9-4.1）")
+    corner_contrast_ratio: float = Field(..., gt=0, description="拐点转角 / 邻域基线 的最小倍数")
+    corner_window_linewidths: float = Field(..., gt=0, description="转角窗口半宽（×线宽）")
 
 
 class BridgeConfig(_Section):
