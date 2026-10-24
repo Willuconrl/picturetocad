@@ -1,0 +1,114 @@
+# R2V 图纸预设参数
+#
+# 结构约定（重要，别改）：
+#   - 每个预设的 `overrides` 只写「要改的参数」，键名必须与 r2v-tool/config.yaml 的
+#     base 完全一致；apply 时按键路径 patch 到 base 之后再做一次 pydantic schema 校验。
+#     未出现的键一律沿用 base 值 —— 这里不重复声明、也不重新定义结构。
+#   - 单位：字段名带 `_mm` 的为毫米；带 `_linewidths` 的为「本地线宽倍数」；
+#     带 `_px` 的为像素（仅允许用于与像素定义强绑定的量，如共线容差）；
+#     其余角度字段带 `_deg`。禁止出现裸数字单位。
+#   - 数值依据见 specs/SPEC.md；精度阈值同步规则见同目录 dxf_rules.md 头部。
+#
+# 用法：
+#   r2v run --config config.yaml --preset blueprint      # 单次覆盖
+#   r2v run --config config.yaml --print-effective       # 打印合并后的有效参数
+
+name: r2v-presets
+version: "0.2"                     # 与 config.yaml 的 meta.schema_version 同步
+base: config.yaml
+
+presets:
+
+  # ---------------------------------------------------------------------------
+  # 地形图 / 宗地图：等高线连续优先，密集注记
+  # ---------------------------------------------------------------------------
+  topo-map:
+    description: "地形图/宗地图：等高线连续优先，密集注记"
+    overrides:
+      preprocess.denoise.method: "bilateral"
+      preprocess.denoise.nlmeans_patch_px: 5
+      preprocess.background_flatten.kernel_scale_linewidths: 15
+      binarize.methods: ["sauvola", "local_gaussian"]   # 光照不均为主，Otsu 易吞细等高线
+      binarize.sauvola.window_ratio: 0.03
+      skeleton.spur_removal.length_threshold_linewidths: 3.0    # 等高线毛刺多，修剪激进
+      skeleton.bridge.max_gap_linewidths: 2.0                   # 桥接保守：宁可断，不要假连
+      skeleton.bridge.max_angle_deg: 15
+      fitting.tolerance_mm: 0.15                                # 等高线允许更大容差
+      fitting.arc_residual_mm: 0.20
+      fitting.prefer_arcs: false                                # 保平滑折线，不强求圆弧
+      text.enable: true
+      text.min_height_mm: 1.5
+      dxf.orthogonalize: false
+      dxf.layer_by_linewidth: true
+
+  # ---------------------------------------------------------------------------
+  # 建筑蓝图 / 施工图：正交墙线、门窗、尺寸标注
+  # ---------------------------------------------------------------------------
+  blueprint:
+    description: "建筑蓝图/施工图：正交墙线、门窗、尺寸标注"
+    overrides:
+      preprocess.denoise.method: "nlmeans"
+      preprocess.background_flatten.kernel_scale_linewidths: 20
+      binarize.methods: ["otsu"]                                # 蓝图对比度高，全局 Otsu 足够
+      skeleton.spur_removal.length_threshold_linewidths: 2.0
+      skeleton.bridge.max_gap_linewidths: 3.0                   # 墙线断口允许更大桥接
+      skeleton.bridge.max_angle_deg: 5                          # 建筑图角度严格
+      fitting.tolerance_mm: 0.085                               # ≈1px@300DPI，严格
+      fitting.arc_residual_mm: 0.15
+      fitting.prefer_arcs: false
+      linewidth.orthogonalize_tolerance_deg: 2.0                # 偏离主轴 ≤2° 强制正交化
+      text.enable: true
+      text.min_height_mm: 2.0
+      text.ocr.recognize_dimensions: true                       # 识别尺寸标注数值
+      text.ocr.recognize_diameter_symbol: false                 # 建筑图少用 Ø
+      dxf.orthogonalize: true                                   # 核心：墙线强制水平/垂直
+      dxf.layer_by_linewidth: true
+      dxf.detect_titleblock: true
+
+  # ---------------------------------------------------------------------------
+  # 机械零件图：圆孔、中心线、公差标注、对称性
+  # ---------------------------------------------------------------------------
+  mechanical:
+    description: "机械零件图：圆孔、中心线、公差标注、对称性"
+    overrides:
+      preprocess.denoise.method: "bilateral"
+      preprocess.background_flatten.enable: false               # 机械图通常干净
+      binarize.methods: ["otsu"]
+      skeleton.bridge.max_gap_linewidths: 1.5                   # 机械图断线少，桥接保守
+      skeleton.bridge.max_angle_deg: 10
+      fitting.tolerance_mm: 0.05                                # 严格，≈0.6px@300DPI
+      fitting.arc_residual_mm: 0.10
+      fitting.prefer_arcs: true                                 # 圆/弧极多，优先识别
+      fitting.full_circle_min_coverage_deg: 330
+      fitting.concentric_tolerance_mm: 0.1                      # 同心圆判定容差
+      text.enable: true
+      text.min_height_mm: 1.5
+      text.ocr.recognize_tolerance: true                        # 识别公差 (⁺¹/₋₁)
+      text.ocr.recognize_diameter_symbol: true                  # 识别 Ø 符号
+      dxf.orthogonalize: false
+      dxf.layer_by_linewidth: true
+      dxf.detect_centerlines: true                              # 点划线单独分层 CENTER
+      dxf.detect_symmetry_axis: true
+
+  # ---------------------------------------------------------------------------
+  # 手绘草图 / 低质量扫描：容差放宽，折线回退比例高
+  # ---------------------------------------------------------------------------
+  sketch:
+    description: "手绘草图/低质量扫描：容差放宽，折线回退比例高"
+    overrides:
+      preprocess.denoise.method: "nlmeans"
+      preprocess.background_flatten.kernel_scale_linewidths: 25
+      binarize.methods: ["sauvola", "niblack"]
+      binarize.sauvola.window_ratio: 0.04
+      binarize.sauvola.k: 0.3
+      skeleton.spur_removal.length_threshold_linewidths: 4.0    # 手绘毛刺极多
+      skeleton.bridge.max_gap_linewidths: 5.0                   # 手绘断口大
+      skeleton.bridge.max_angle_deg: 25
+      fitting.tolerance_mm: 0.3                                 # 大幅放宽
+      fitting.arc_residual_mm: 0.30
+      fitting.prefer_arcs: false
+      linewidth.fallback_polyline_ratio: 0.8                    # 允许大面积回退折线
+      text.enable: false                                        # 手绘文字识别率太低，默认关闭
+      dxf.orthogonalize: false
+      dxf.layer_by_linewidth: false                             # 手绘线宽无意义，单图层
+      dxf.detect_titleblock: false

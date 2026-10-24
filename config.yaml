@@ -288,7 +288,7 @@ dxf:
 # 完整清单与说明见 .dsh/skills/r2v-domain/presets.yaml
 # -----------------------------------------------------------------------------
 presets:
-  file: ".dsh/skills/r2v-domain/presets.yaml"
+  file: "config/presets.yaml"
   default: null                        # null = 不套预设，纯 base
   validate_after_apply: true           # patch 后重新跑一遍 schema 校验
   allow_unknown_keys: false            # 覆盖到 base 不存在的键 = 硬失败（防拼写漂移）
