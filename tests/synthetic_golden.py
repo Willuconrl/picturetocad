@@ -131,6 +131,9 @@ class Scene:
     dpi: float
     line_width_px: int
     specs: tuple[Spec, ...]
+    #: 把 PolylineSpec 的 bulge 段炸成独立 LINE/ARC 写出（M8-4：管线的产物就是原子基元，
+    #: golden 若打包成 LWPOLYLINE，图层/闭合两个维度就变成"打包方式"的比较）
+    explode_bulges: bool = False
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -317,6 +320,17 @@ def render_png_bytes(scene: Scene) -> bytes:
 # ---------------------------------------------------------------------------
 # DXF 写出（与 PNG 同源）
 # ---------------------------------------------------------------------------
+def expected_entity_count(scene: Scene) -> int:
+    """golden 里的实体数。`explode_bulges` 时 PolylineSpec 会展开成多段。"""
+    total = 0
+    for spec in scene.specs:
+        if isinstance(spec, PolylineSpec) and scene.explode_bulges:
+            total += len(spec.points) if spec.closed else len(spec.points) - 1
+        else:
+            total += 1
+    return total
+
+
 def build_dxf(scene: Scene) -> ezdxf.document.Drawing:
     doc = ezdxf.new("R2018", setup=False)
     doc.header["$INSUNITS"] = 4  # mm
@@ -337,11 +351,28 @@ def build_dxf(scene: Scene) -> ezdxf.document.Drawing:
                 spec.center, spec.radius, spec.start_deg, spec.end_deg, dxfattribs=attribs
             )
         elif isinstance(spec, PolylineSpec):
-            pts = [
-                (x, y, 0.0, 0.0, float(b))
-                for (x, y), b in zip(spec.points, spec.resolved_bulges)
-            ]
-            msp.add_lwpolyline(pts, format="xyseb", close=spec.closed, dxfattribs=attribs)
+            if scene.explode_bulges:
+                vertex_count = len(spec.points)
+                indices = range(vertex_count if spec.closed else vertex_count - 1)
+                for i in indices:
+                    p1 = spec.points[i]
+                    p2 = spec.points[(i + 1) % vertex_count]
+                    bulge = float(spec.resolved_bulges[i])
+                    if abs(bulge) < 1e-12:
+                        msp.add_line(p1, p2, dxfattribs={"layer": spec.layer})
+                    else:
+                        center, a0, a1, radius = bulge_to_arc(p1, p2, bulge)
+                        msp.add_arc(
+                            (float(center.x), float(center.y)), float(radius),
+                            float(np.degrees(a0)), float(np.degrees(a1)),
+                            dxfattribs={"layer": "ARCS"},
+                        )
+            else:
+                pts = [
+                    (x, y, 0.0, 0.0, float(b))
+                    for (x, y), b in zip(spec.points, spec.resolved_bulges)
+                ]
+                msp.add_lwpolyline(pts, format="xyseb", close=spec.closed, dxfattribs=attribs)
         else:  # pragma: no cover - 类型已穷举
             raise TypeError(f"未知的 Spec 类型：{type(spec)!r}")
     return doc
@@ -403,7 +434,8 @@ def all_scenes() -> tuple[Scene, ...]:
                     bulges=(0.5, 0.0, 0.0),
                 ),
             ),
-            note="LWPOLYLINE 含 bulge=0.5 首段（106.26° 弧），用于 bulge 写读一致",
+            explode_bulges=True,
+            note="bulge=0.5 首段（106.26° 弧）；golden 按原子基元写 LINE+ARC（M8-4）",
         ),
     )
 
@@ -446,8 +478,9 @@ def check(images_dir: Path, golden_dir: Path) -> list[str]:
             problems.append(f"golden 与代码不一致（字节有差异）：{dxf}")
         doc = ezdxf.readfile(dxf)
         actual = len(list(doc.modelspace()))
-        if actual != len(scene.specs):
-            problems.append(f"实体数不符：{dxf} 有 {actual} 个，期望 {len(scene.specs)}")
+        expected = expected_entity_count(scene)
+        if actual != expected:
+            problems.append(f"实体数不符：{dxf} 有 {actual} 个，期望 {expected}")
     return problems
 
 

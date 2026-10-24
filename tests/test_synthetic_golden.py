@@ -20,6 +20,7 @@ from src.golden_compare import (
     canonical_sort,
     read_dxf,
 )
+from ezdxf.math import bulge_to_arc
 from tests.synthetic_golden import (
     ArcSpec,
     CircleSpec,
@@ -30,6 +31,7 @@ from tests.synthetic_golden import (
     build_dxf,
     check,
     dxf_bytes,
+    expected_entity_count,
     render_png_bytes,
     render_scene,
 )
@@ -54,6 +56,27 @@ def _expected_entities(scene: Scene) -> list[GeomEntity]:
                     end_deg=spec.end_deg,
                 )
             )
+        elif isinstance(spec, PolylineSpec) and scene.explode_bulges:
+            # 生成器会把 bulge 段炸成独立 LINE/ARC（M8-4），期望值必须同步
+            count = len(spec.points)
+            indices = range(count if spec.closed else count - 1)
+            for i in indices:
+                p1 = spec.points[i]
+                p2 = spec.points[(i + 1) % count]
+                bulge = float(spec.resolved_bulges[i])
+                if abs(bulge) < 1e-12:
+                    out.append(GeomLine(layer=spec.layer, start=p1, end=p2))
+                else:
+                    center, a0, a1, radius = bulge_to_arc(p1, p2, bulge)
+                    out.append(
+                        GeomArc(
+                            layer="ARCS",
+                            center=(float(center.x), float(center.y)),
+                            radius=float(radius),
+                            start_deg=float(np.degrees(a0)),
+                            end_deg=float(np.degrees(a1)),
+                        )
+                    )
         elif isinstance(spec, PolylineSpec):
             out.append(
                 GeomPolyline(
@@ -190,4 +213,4 @@ def test_golden_dxf_present_and_parsable() -> None:
         assert path.is_file(), f"缺 golden：{path}"
         doc = ezdxf.readfile(path)
         assert doc.dxfversion == "AC1032"  # R2018
-        assert len(list(doc.modelspace())) == len(scene.specs)
+        assert len(list(doc.modelspace())) == expected_entity_count(scene)
