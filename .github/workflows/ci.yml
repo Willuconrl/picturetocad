@@ -52,6 +52,8 @@ jobs:
         run: python scripts/verify_wheels.py --check
 
       - name: Run tests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
           python -m pytest -q --tb=no > pytest.log 2>&1
@@ -103,6 +105,8 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
           python -m pytest -q --tb=no > pytest.log 2>&1
