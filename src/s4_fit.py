@@ -830,9 +830,15 @@ def run_s4_fit(
             )
             continue
 
+        _raw_endpoints = [
+            ((float(seg.points[0][0]), float(seg.points[0][1])),
+             (float(seg.points[-1][0]), float(seg.points[-1][1])))
+            for seg in segments
+        ]
         for index, segment in enumerate(segments):
             start = (round(float(segment.points[0][0]), 4), round(float(segment.points[0][1]), 4))
             end = (round(float(segment.points[-1][0]), 4), round(float(segment.points[-1][1]), 4))
+            # （接缝共享端点在循环末尾用切点原坐标统一覆盖，见下方 _raw_endpoints）
             node_a: int | None = None
             node_b: int | None = None
 
@@ -873,6 +879,11 @@ def run_s4_fit(
                     end = candidate
                     node_b = edge.node_b
 
+            # 接缝共享端点：用**切点原坐标**强制相邻基元逐位相等（不用平均、不用延伸值）
+            if index > 0:
+                start = (round(_raw_endpoints[index][0][0], 4), round(_raw_endpoints[index][0][1], 4))
+            if index < len(segments) - 1:
+                end = (round(_raw_endpoints[index][1][0], 4), round(_raw_endpoints[index][1][1], 4))
             if segment.kind == "line":
                 assert isinstance(segment.model, LineModel)
                 model = segment.model
