@@ -123,6 +123,7 @@ jobs:
           exit $rc
 
       - name: Check contracts
+        shell: bash
         run: |
           set +e
           python scripts/check_contracts.py > contracts.log 2>&1
