@@ -466,8 +466,9 @@ class SkeletonConfig(_Section):
 class FittingConfig(_Section):
     tolerance_mm: float = Field(..., gt=0)
     dp_epsilon_px: float | None
-    arc_residual_factor: float = Field(..., gt=0)
-    arc_residual_px: float | None
+    arc_residual_mm: float = Field(..., gt=0, description="分段/圆弧残差上限（绝对毫米，M8-4）")
+    arc_residual_factor: float | None = Field(default=None, description="[DEPRECATED] 旧口径，设值会告警")
+    arc_residual_px: float | None = Field(default=None, description="[DEPRECATED] 由 arc_residual_mm 换算")
     prefer_arcs: bool
     model_select_alpha: float = Field(..., gt=0, lt=1, description="F 检验显著性水平（模型竞争）")
     full_circle_min_coverage_deg: float = Field(..., gt=0, le=360)

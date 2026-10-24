@@ -94,7 +94,7 @@ def test_missing_entity_is_caught_by_count() -> None:
     result = compare_geometry(ref, [], **PARAMS)
     assert not result.passed
     assert "ENTITY_COUNT" in result.failed_checks
-    assert result.entity_count_diff == -1
+    assert result.entity_count_diff == -result.entity_count_ref
     assert result.count_by_kind_cand == {}
 
 

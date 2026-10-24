@@ -541,9 +541,37 @@ def split_and_fit(
     max_segments: int,
     arc_tolerance_px: float | None = None,
     depth: int = 0,
+    plan: object | None = None,
 ) -> tuple[list[_Segment], list[str]]:
     """递归分段拟合：整段残差超限就在最大残差点切开。"""
     warnings: list[str] = []
+    # M8-4：切分预言机给出的计划（只含切点与模型类型）。拟合仍走本函数既有的
+    # fit_line / fit_circle + select_model，后处理链完全不变。
+    if plan is not None and depth == 0:
+        boundaries = [0] + [int(index) for index in getattr(plan, "split_indices", ())] + [len(points)]
+        types = list(getattr(plan, "model_types", ()))
+        segments: list[_Segment] = []
+        for position, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+            stop = end + 1 if end < len(points) else end   # 与递归切分一致：切点处共享一个点
+            chunk = points[start:stop]
+            if len(chunk) < 2:
+                continue
+            kind_hint = types[position].lower() if position < len(types) else None
+            line_model = fit_line(chunk)
+            circle_model = fit_circle(chunk) if len(chunk) >= _MIN_CIRCLE_POINTS else None
+            if kind_hint == "line":
+                model, kind = line_model, "line"
+            elif kind_hint == "arc":
+                model, kind = circle_model, "circle"
+            else:
+                kind = select_model(line_model, circle_model, n=len(chunk), alpha=alpha, prefer_arcs=prefer_arcs)
+                model = circle_model if kind == "circle" else line_model
+            if model is None:
+                continue
+            segments.append(_Segment(points=chunk, model=model, kind=kind))
+        if len(segments) > max_segments or not segments:
+            return [], warnings
+        return segments, warnings
     if len(points) < 2 or depth > _MAX_SPLIT_DEPTH:
         return [], warnings
     if len(points) < _MIN_SEGMENT_POINTS:
@@ -636,11 +664,14 @@ def run_s4_fit(
 
     mm_per_px = 25.4 / source.dpi
     tolerance_px = max(_MIN_DP_TOLERANCE_PX, float(fitting.tolerance_mm) / mm_per_px)
-    arc_residual_px = (
-        float(fitting.arc_residual_px)
-        if fitting.arc_residual_px is not None
-        else float(fitting.arc_residual_factor) * source.linewidth_px
-    )
+    # M8-4：残差判据改为**绝对毫米**，与线宽解耦。
+    if getattr(fitting, "arc_residual_factor", None) is not None:
+        warnings.warn(
+            "fitting.arc_residual_factor 已废弃（旧口径 ×线宽），请改用 fitting.arc_residual_mm；本版本忽略该值",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    arc_residual_px = float(fitting.arc_residual_mm) / mm_per_px
     min_segment_px = float(fitting.min_segment_length_linewidths) * source.linewidth_px
     close_tolerance_px = float(fitting.full_circle_close_tolerance_mm) / mm_per_px
     alpha = float(fitting.model_select_alpha)
@@ -754,13 +785,18 @@ def run_s4_fit(
             )
             continue
 
+        # M8-4：切分预言机只给"切点 + 模型类型"，拟合与后处理仍走本函数既有链路
+        from src.s4_segment import plan_segmentation
+
+        _plan = plan_segmentation(centerline, tolerance_px=arc_residual_px)
         segments, segment_warnings = split_and_fit(
-            fit_points,
+            centerline if _plan.segment_count > 1 else fit_points,
             tolerance_px=tolerance_px,
             alpha=alpha,
             prefer_arcs=bool(fitting.prefer_arcs),
             max_segments=int(fitting.max_segments_per_curve),
             arc_tolerance_px=max(tolerance_px, 0.5 * arc_residual_px),
+            plan=_plan,
         )
         warnings.extend(segment_warnings)
         segments = _merge_same_kind(segments)
@@ -794,9 +830,15 @@ def run_s4_fit(
             )
             continue
 
+        _raw_endpoints = [
+            ((float(seg.points[0][0]), float(seg.points[0][1])),
+             (float(seg.points[-1][0]), float(seg.points[-1][1])))
+            for seg in segments
+        ]
         for index, segment in enumerate(segments):
             start = (round(float(segment.points[0][0]), 4), round(float(segment.points[0][1]), 4))
             end = (round(float(segment.points[-1][0]), 4), round(float(segment.points[-1][1]), 4))
+            # （接缝共享端点在循环末尾用切点原坐标统一覆盖，见下方 _raw_endpoints）
             node_a: int | None = None
             node_b: int | None = None
 
@@ -837,11 +879,22 @@ def run_s4_fit(
                     end = candidate
                     node_b = edge.node_b
 
+            # 接缝共享端点：用**切点原坐标**强制相邻基元逐位相等（不用平均、不用延伸值）
+            if index > 0:
+                start = (round(_raw_endpoints[index][0][0], 4), round(_raw_endpoints[index][0][1], 4))
+            if index < len(segments) - 1:
+                end = (round(_raw_endpoints[index][1][0], 4), round(_raw_endpoints[index][1][1], 4))
             if segment.kind == "line":
                 assert isinstance(segment.model, LineModel)
                 model = segment.model
                 # 直线必须**紧**：容差用几何容差（≈1px），不是圆弧的宽松残差上限
                 too_rough = model.rms > tolerance_px
+                if too_rough:
+                    warnings.append(
+                        f"LINE_DEGRADED_TO_POLYLINE edge={edge.id} seg={index} "
+                        f"rms_px={model.rms:.3f} tolerance_px={tolerance_px:.3f} "
+                        f"points={len(segment.points)}"
+                    )
                 emit(
                     kind="lwpolyline" if too_rough else "line",
                     node_a=node_a, node_b=node_b, start=start, end=end,
@@ -876,9 +929,20 @@ def run_s4_fit(
                     end_angle = angles[-1]
                 # 扫角必须**带符号**：图像系 Y 向下时，同一段弧的图像角度变化方向
                 # 与 CAD 相反。只取模长会把弧写成"补角那一段"（实测 30°–150° 的弧
-                # 被写成 278°–33°，Hausdorff 292px）。符号约定：正=图像角度递增。
+                # 被写成 278°–33°，Hausdorff 292px）。
+                #
+                # 方向用**首/中/末三点的叉积符号**判定（确定性，不做切向投票）：
+                # 点的先后顺序来自 S3 轮廓，本身就是拓扑真值。
+                # 推导：图像坐标（y 向下）中 θ 递增时，(mid−first)×(last−mid) 的 z 分为负。
+                first_point = segment.points[0]
+                last_point = segment.points[-1]
+                mid_point = segment.points[len(segment.points) // 2]
+                cross_z = float(
+                    (mid_point[0] - first_point[0]) * (last_point[1] - mid_point[1])
+                    - (mid_point[1] - first_point[1]) * (last_point[0] - mid_point[0])
+                )
                 signed = float(unwrapped[-1] - unwrapped[0])
-                forward = signed >= 0.0
+                forward = cross_z > 0.0
                 # 端点延伸：骨架节点比墨迹端短 1–2px，沿圆周补到墨迹端，再复拟合保持共圆
                 extended_start, extended_end = _arc_extent(
                     model,
@@ -917,6 +981,14 @@ def run_s4_fit(
                 too_rough = model.rms > arc_residual_px
                 too_small = model.radius < float(fitting.min_arc_radius_linewidths) * source.linewidth_px
                 if too_rough or too_small:
+                    warnings.append(
+                        "ARC_DEGRADED_TO_POLYLINE edge={} seg={} rms_px={:.3f} "
+                        "limit_px={:.3f} radius_px={:.3f} min_radius_px={:.3f} reason={}".format(
+                            edge.id, index, model.rms, arc_residual_px, model.radius,
+                            float(fitting.min_arc_radius_linewidths) * source.linewidth_px,
+                            "ARC_RMS_EXCEEDS_TOLERANCE" if too_rough else "ARC_RADIUS_TOO_SMALL",
+                        )
+                    )
                     reason = (
                         f"arc rms {model.rms:.3f}px > {arc_residual_px:.3f}px"
                         if too_rough

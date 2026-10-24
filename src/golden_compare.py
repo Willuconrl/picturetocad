@@ -232,7 +232,12 @@ def _polyline_chain(e: GeomPolyline, spacing_mm: float) -> np.ndarray:
         p2 = e.points[(i + 1) % n]
         b = e.bulges[i] if i < len(e.bulges) else 0.0
         if abs(b) < 1e-12:
-            chunk = np.array([p1, p2], dtype=np.float64)
+            # 直线段也必须**按 spacing 重采样**：只给两个端点的话，点云会退化成稀疏的
+            # 两点，对侧（候选 LINE 是按 spacing 采样的）沿线段中部的距离会被错误放大
+            # ——实测 bulge 场景因此虚报 9.008 mm（线中点距最近参考点 = 半段长）。
+            length = float(np.linalg.norm(np.asarray(p2) - np.asarray(p1)))
+            count = max(2, int(np.ceil(length / spacing_mm)) + 1)
+            chunk = np.linspace(np.asarray(p1, dtype=np.float64), np.asarray(p2, dtype=np.float64), count)
         else:
             center, a0, a1, radius = bulge_to_arc(p1, p2, b)
             chunk = _arc_points(
@@ -436,6 +441,47 @@ def atomic_counts(entities: Sequence[GeomEntity], *, spacing_mm: float) -> dict[
     return dict(sorted(out.items()))
 
 
+def explode_atomic(entities: Sequence[GeomEntity]) -> list[GeomEntity]:
+    """把带 bulge 的 LWPOLYLINE **炸成独立的 LINE / ARC 实体**（几何不变）。
+
+    为什么需要：golden 把"直线 + 圆弧"打包成一条多段线，管线输出的是两条独立基元。
+    `atomic_counts` 只在**计数**维度做了这层展开，而尺寸/图层/闭合三个维度仍按原始
+    实体比 → 出现 `COUNT_MISMATCH:LWPOLYLINE`、尺寸无从配对。此函数把展开结果做成
+    实体列表，让五个维度统一在"原子基元"语义上比较。
+    """
+    out: list[GeomEntity] = []
+    for e in entities:
+        if not isinstance(e, GeomPolyline):
+            out.append(e)
+            continue
+        n = len(e.points)
+        indices = range(n if e.closed else n - 1)
+        for i in indices:
+            p1 = e.points[i]
+            p2 = e.points[(i + 1) % n]
+            bulge = float(e.bulges[i]) if i < len(e.bulges) else 0.0
+            if abs(bulge) < 1e-12:
+                out.append(
+                    GeomLine(
+                        layer=e.layer,
+                        start=(float(p1[0]), float(p1[1])),
+                        end=(float(p2[0]), float(p2[1])),
+                    )
+                )
+            else:
+                center, a0, a1, radius = bulge_to_arc(p1, p2, bulge)
+                out.append(
+                    GeomArc(
+                        layer=e.layer,
+                        center=(float(center.x), float(center.y)),
+                        radius=float(radius),
+                        start_deg=float(np.degrees(a0)),
+                        end_deg=float(np.degrees(a1)),
+                    )
+                )
+    return out
+
+
 def _layer_distribution(entities: Sequence[GeomEntity]) -> dict[str, int]:
     out: dict[str, int] = {}
     for e in entities:
@@ -500,8 +546,13 @@ def compare_geometry(
             failed.append("HAUSDORFF_P95")
 
     # 关键尺寸：按类型配对比较（数量不齐时只比较能配对的部分，并记差异）
-    ref_sorted = canonical_sort(ref)
-    cand_sorted = canonical_sort(cand)
+    # 尺寸/图层/闭合三个维度统一在"原子基元"语义上比较（见 explode_atomic 的说明）
+    if count_mode == "atomic":
+        ref_sorted = canonical_sort(explode_atomic(ref))
+        cand_sorted = canonical_sort(explode_atomic(cand))
+    else:
+        ref_sorted = canonical_sort(ref)
+        cand_sorted = canonical_sort(cand)
     by_kind_ref: dict[str, list[GeomEntity]] = {}
     by_kind_cand: dict[str, list[GeomEntity]] = {}
     for e in ref_sorted:
