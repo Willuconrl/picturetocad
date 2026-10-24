@@ -476,11 +476,18 @@ def _png_pixel_delta(committed: Path, rendered: bytes) -> tuple[bool, float, flo
         return False, 255.0, 255.0, "无法解码 PNG"
     if committed_image.shape != rendered_image.shape:
         return False, 255.0, 255.0, f"尺寸不同 {committed_image.shape} vs {rendered_image.shape}"
+    # 抗锯齿（LINE_AA）的逐像素结果依赖 OpenCV 的 SIMD/编译选项，跨平台会有 ±几十的差异。
+    # 因此比对**二值掩膜**：ink 区域必须几乎完全一致（IoU ≥ 0.999），整体漂移仍能抓到。
+    committed_ink = committed_image < 128
+    rendered_ink = rendered_image < 128
+    union = np.logical_or(committed_ink, rendered_ink).sum()
+    inter = np.logical_and(committed_ink, rendered_ink).sum()
+    iou = float(inter) / float(union) if union else 1.0
     delta = np.abs(committed_image.astype(np.int16) - rendered_image.astype(np.int16))
     max_diff = float(delta.max()) if delta.size else 0.0
     mean_diff = float(delta.mean()) if delta.size else 0.0
-    ok = max_diff <= 8.0 and mean_diff <= 0.5
-    return ok, max_diff, mean_diff, ""
+    ok = iou >= 0.999
+    return ok, max_diff, mean_diff, f"ink IoU={iou:.5f}"
 
 
 def check(images_dir: Path, golden_dir: Path) -> list[str]:
