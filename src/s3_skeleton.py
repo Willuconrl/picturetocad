@@ -805,6 +805,40 @@ def _intersect_lines(a: tuple[np.ndarray, np.ndarray], b: tuple[np.ndarray, np.n
     return p1 + t[0] * d1
 
 
+def _fit_circle_kasa(points: np.ndarray) -> tuple[np.ndarray, float] | None:
+    """Kåsa 代数圆拟合（闭式解），返回 (圆心, 半径)；点数不足或退化时返回 None。"""
+    if len(points) < 5:
+        return None
+    x = points[:, 0]
+    y = points[:, 1]
+    matrix = np.column_stack([x, y, np.ones_like(x)])
+    rhs = x * x + y * y
+    try:
+        solution, *_ = np.linalg.lstsq(matrix, rhs, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+    cx = solution[0] / 2.0
+    cy = solution[1] / 2.0
+    value = solution[2] + cx * cx + cy * cy
+    if not np.isfinite(value) or value <= 0:
+        return None
+    return np.array([cx, cy]), float(math.sqrt(value))
+
+
+def _line_circle_intersections(
+    point: np.ndarray, direction: np.ndarray, centre: np.ndarray, radius: float
+) -> list[np.ndarray]:
+    """直线与圆的闭式交点（解一元二次方程，无迭代）。"""
+    offset = point - centre
+    b = 2.0 * float(offset @ direction)
+    c = float(offset @ offset) - radius * radius
+    disc = b * b - 4.0 * c
+    if disc < 0:
+        return []
+    root = math.sqrt(disc)
+    return [point + t * direction for t in ((-b - root) / 2.0, (-b + root) / 2.0)]
+
+
 def sharpen_corners(graph: TopologyGraph, *, min_angle_deg: float, window_px: float) -> tuple[TopologyGraph, int]:
     """把 line↔line 的 `corner` 节点替换为**两侧直线段的解析交点**（M9-1）。
 
@@ -849,7 +883,43 @@ def sharpen_corners(graph: TopologyGraph, *, min_angle_deg: float, window_px: fl
             continue
         intersection = _intersect_lines((c1, d1), (c2, d2))
         if intersection is None:
-            continue
+            # line↔arc 接缝：一侧拟合直线，另一侧拟合圆，求闭式交点（M9-1 Phase 3）
+            circles = []
+            for edge in incident:
+                pts = np.asarray(edge.points, dtype=np.float64)
+                circles.append(_fit_circle_kasa(pts))
+            pair = None
+            for index in (0, 1):
+                circle = circles[index]
+                line_fit = fits[1 - index]
+                if circle is None or line_fit is None:
+                    continue
+                centre_c, radius_c = circle
+                line_point, line_dir = line_fit
+                # 圆拟合残差要明显小于直线拟合，才认定为"弧侧"
+                pts_arc = np.asarray(incident[index].points, dtype=np.float64)
+                circle_rms = float(np.sqrt(np.mean((np.hypot(pts_arc[:,0]-centre_c[0], pts_arc[:,1]-centre_c[1]) - radius_c) ** 2)))
+                line_rms = float(np.sqrt(np.mean(((pts_arc - line_point) @ np.array([-line_dir[1], line_dir[0]])) ** 2)))
+                if circle_rms >= line_rms:
+                    continue
+                candidates = _line_circle_intersections(line_point, line_dir, centre_c, radius_c)
+                if not candidates:
+                    continue
+                best = min(candidates, key=lambda pt: math.hypot(pt[0] - node.x, pt[1] - node.y))
+                # 切向角：直线方向 vs 圆在该点的切线（都指向远离节点一侧）
+                normal = (best - centre_c) / max(float(np.linalg.norm(best - centre_c)), 1e-9)
+                tangent = np.array([-normal[1], normal[0]])
+                if tangent @ (line_point - best) < 0:
+                    tangent = -tangent
+                cosine = float(np.clip(abs(tangent @ line_dir), -1.0, 1.0))
+                angle_deg = math.degrees(math.acos(cosine))
+                if angle_deg < min_angle_deg:
+                    continue
+                pair = best
+                break
+            intersection = pair
+            if intersection is None:
+                continue
         offset = float(np.hypot(intersection[0] - node.x, intersection[1] - node.y))
         if not np.isfinite(offset) or offset > 3.0 * window_px:
             continue
