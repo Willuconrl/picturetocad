@@ -918,9 +918,20 @@ def run_s4_fit(
                     end_angle = angles[-1]
                 # 扫角必须**带符号**：图像系 Y 向下时，同一段弧的图像角度变化方向
                 # 与 CAD 相反。只取模长会把弧写成"补角那一段"（实测 30°–150° 的弧
-                # 被写成 278°–33°，Hausdorff 292px）。符号约定：正=图像角度递增。
+                # 被写成 278°–33°，Hausdorff 292px）。
+                #
+                # 方向用**首/中/末三点的叉积符号**判定（确定性，不做切向投票）：
+                # 点的先后顺序来自 S3 轮廓，本身就是拓扑真值。
+                # 推导：图像坐标（y 向下）中 θ 递增时，(mid−first)×(last−mid) 的 z 分为负。
+                first_point = segment.points[0]
+                last_point = segment.points[-1]
+                mid_point = segment.points[len(segment.points) // 2]
+                cross_z = float(
+                    (mid_point[0] - first_point[0]) * (last_point[1] - mid_point[1])
+                    - (mid_point[1] - first_point[1]) * (last_point[0] - mid_point[0])
+                )
                 signed = float(unwrapped[-1] - unwrapped[0])
-                forward = signed >= 0.0
+                forward = cross_z > 0.0
                 # 端点延伸：骨架节点比墨迹端短 1–2px，沿圆周补到墨迹端，再复拟合保持共圆
                 extended_start, extended_end = _arc_extent(
                     model,
