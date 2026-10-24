@@ -48,7 +48,13 @@ jobs:
         run: python scripts/verify_wheels.py --check
 
       - name: Run tests
-        run: python -m pytest -q
+        run: |
+          set +e
+          python -m pytest -q --tb=no > pytest.log 2>&1
+          rc=$?
+          tail -40 pytest.log
+          python scripts/ci_report_status.py pytest.log "$rc"
+          exit $rc
 
       - name: Check contracts
         run: python scripts/check_contracts.py
@@ -92,7 +98,14 @@ jobs:
         run: python scripts/verify_wheels.py --check
 
       - name: Run tests
-        run: python -m pytest -q
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q --tb=no > pytest.log 2>&1
+          rc=$?
+          tail -40 pytest.log
+          python scripts/ci_report_status.py pytest.log "$rc"
+          exit $rc
 
       - name: Check contracts
         run: python scripts/check_contracts.py
